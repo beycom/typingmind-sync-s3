@@ -2350,7 +2350,6 @@ function exportBackupData() {
         timestamp: Date.now(), // Legacy support
         metadata: {
           timestamp: Date.now(),
-          deviceId: getOrCreateDeviceId(),
           version: VERSION
         }
       };
