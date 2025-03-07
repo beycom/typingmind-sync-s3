@@ -662,15 +662,81 @@ async function deleteChatFromCloud(chatId) {
       await uploadCloudMetadata(cloudMetadata);
     }
     
-    // Also remove it from local metadata if it exists
-    if (localMetadata.chats && localMetadata.chats[chatId]) {
-      delete localMetadata.chats[chatId];
+    // Create a "tombstone" entry in local metadata to mark this chat as deleted
+    // This prevents the chat from being re-downloaded in future syncs
+    if (localMetadata.chats) {
+      localMetadata.chats[chatId] = {
+        deleted: true,
+        deletedAt: Date.now(),
+        lastModified: Date.now(),
+        syncedAt: Date.now() // Mark as synced to prevent re-uploading
+      };
       saveLocalMetadata();
+      logToConsole("info", `Created tombstone entry for deleted chat ${chatId} in local metadata`);
     }
     
     return true;
   } catch (error) {
     logToConsole("error", `Error deleting chat ${chatId} from cloud`, error);
+    throw error;
+  }
+}
+
+// Delete a chat locally from IndexedDB
+async function deleteLocalChat(chatId) {
+  logToConsole("cleanup", `Deleting chat ${chatId} locally`);
+  
+  try {
+    const key = chatId.startsWith('CHAT_') ? chatId : `CHAT_${chatId}`;
+    const request = indexedDB.open("keyval-store", 1);
+    
+    const db = await new Promise((resolve, reject) => {
+      request.onerror = () => reject(request.error);
+      request.onsuccess = (event) => resolve(event.target.result);
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains('keyval')) {
+          db.createObjectStore('keyval');
+        }
+      };
+    });
+    
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction(["keyval"], "readwrite");
+      const store = transaction.objectStore("keyval");
+      const deleteRequest = store.delete(key);
+      
+      deleteRequest.onsuccess = () => {
+        logToConsole("success", `Deleted chat ${chatId} from local IndexedDB`);
+        resolve();
+      };
+      
+      deleteRequest.onerror = () => {
+        reject(deleteRequest.error);
+      };
+    });
+    
+    // Create a "tombstone" entry in metadata to mark this chat as deleted
+    // This prevents the chat from being re-downloaded if it exists in the cloud
+    if (localMetadata.chats) {
+      localMetadata.chats[chatId] = {
+        deleted: true,
+        deletedAt: Date.now(),
+        lastModified: Date.now(),
+        syncedAt: 0
+      };
+      saveLocalMetadata();
+      logToConsole("info", `Created tombstone entry for deleted chat ${chatId} in local metadata`);
+    }
+    
+    // Also remove from lastSeenUpdates
+    if (lastSeenUpdates[chatId]) {
+      delete lastSeenUpdates[chatId];
+    }
+    
+    return true;
+  } catch (error) {
+    logToConsole("error", `Error deleting chat ${chatId} locally`, error);
     throw error;
   }
 }
@@ -854,7 +920,7 @@ async function syncFromCloud() {
     const cloudMetadata = await downloadCloudMetadata();
     
     // Check for settings changes
-    if (cloudMetadata.settings && 
+    if (cloudMetadata.settings &&
         cloudMetadata.settings.lastModified > localMetadata.settings.syncedAt) {
       logToConsole("info", "Settings changes detected in cloud");
       
@@ -865,7 +931,7 @@ async function syncFromCloud() {
       if (cloudSettings) {
         // Apply each setting (preserving only security-related keys)
         const preserveKeys = [
-          "aws-bucket", "aws-access-key", "aws-secret-key", "aws-region", 
+          "aws-bucket", "aws-access-key", "aws-secret-key", "aws-region",
           "aws-endpoint", "encryption-key", "chat-sync-metadata"
         ];
         
@@ -878,8 +944,6 @@ async function syncFromCloud() {
         // Update local metadata
         localMetadata.settings.syncedAt = cloudMetadata.settings.lastModified;
         saveLocalMetadata();
-        
-        // logToConsole("success", "Applied ALL localStorage settings from cloud");
       }
     }
     
@@ -896,50 +960,75 @@ async function syncFromCloud() {
       const currentLocalChats = await getAllChatsFromIndexedDB();
       const currentLocalChatIds = new Set(currentLocalChats.map(chat => chat.id));
       
-      // Identify chats that need to be downloaded or deleted
-      for (const [chatId, cloudChatMeta] of Object.entries(cloudMetadata.chats)) {
-        // Check if the chat exists locally (in IndexedDB)
-        const chatExistsLocally = currentLocalChatIds.has(chatId);
-        const localChatMeta = localMetadata.chats[chatId];
-        
-        // If chat doesn't exist locally but exists in cloud and metadata, it might have been deleted
-        if (!chatExistsLocally) {
-          // Check if we've seen this chat before (in our metadata)
-          if (localChatMeta) {
-            // This chat used to exist locally but now it's gone - mark for deletion
-            // We use a time threshold to differentiate between not-yet-synced and deleted chats
-            const deletionThreshold = 5 * 60 * 1000; // 5 minutes in milliseconds
-            const timeSinceLastSync = Date.now() - localMetadata.lastSyncTime;
-            
-            if (timeSinceLastSync > deletionThreshold) {
-              chatChanges.toDelete.push(chatId);
-              logToConsole("cleanup", `Marking chat ${chatId} for deletion - exists in cloud but not locally anymore`);
-              continue;
-            }
-          }
-        }
-        
-        if (!localChatMeta ||
-                  // First check hashes if available
-                  (cloudChatMeta.hash && localChatMeta.hash && cloudChatMeta.hash !== localChatMeta.hash) ||
-                  // Fall back to timestamp comparison only if hashes aren't available
-                  (!cloudChatMeta.hash || !localChatMeta.hash) && cloudChatMeta.lastModified >= localChatMeta.syncedAt) {
-                // Cloud version is different or newer
-          chatChanges.toDownload.push(chatId);
-        } else if (localChatMeta.lastModified > localChatMeta.syncedAt) {
-          // Local version is newer
-          chatChanges.toUpload.push(chatId);
-        } else {
-          // No changes
-          chatChanges.unchanged.push(chatId);
-        }
-      }
+     // Identify chats that need to be downloaded or deleted
+     for (const [chatId, cloudChatMeta] of Object.entries(cloudMetadata.chats)) {
+       // Check if the chat exists locally (in IndexedDB)
+       const chatExistsLocally = currentLocalChatIds.has(chatId);
+       const localChatMeta = localMetadata.chats[chatId];
+       
+       // Check if this chat is marked as deleted locally (tombstone entry)
+       if (localChatMeta && localChatMeta.deleted === true) {
+         // This is a tombstone entry, we should delete the chat from cloud
+         chatChanges.toDelete.push(chatId);
+         logToConsole("cleanup", `Chat ${chatId} has a local tombstone entry - marking for deletion from cloud`);
+         continue;
+       }
+       
+       // If chat doesn't exist locally but exists in cloud and metadata, it might have been deleted
+       if (!chatExistsLocally) {
+         // Check if we've seen this chat before (in our metadata)
+         if (localChatMeta) {
+           // This chat used to exist locally but now it's gone - mark for deletion
+           // We use a time threshold to differentiate between not-yet-synced and deleted chats
+           const deletionThreshold = 5 * 60 * 1000; // 5 minutes in milliseconds
+           const timeSinceLastSync = Date.now() - localMetadata.lastSyncTime;
+           
+           if (timeSinceLastSync > deletionThreshold) {
+             chatChanges.toDelete.push(chatId);
+             logToConsole("cleanup", `Marking chat ${chatId} for deletion - exists in cloud but not locally anymore`);
+             continue;
+           }
+         }
+       }
+       
+       if (!localChatMeta ||
+           // First check hashes if available
+           (cloudChatMeta.hash && localChatMeta.hash && cloudChatMeta.hash !== localChatMeta.hash) ||
+           // Fall back to timestamp comparison only if hashes aren't available
+           (!cloudChatMeta.hash || !localChatMeta.hash) && cloudChatMeta.lastModified >= localChatMeta.syncedAt) {
+         // Cloud version is different or newer
+         chatChanges.toDownload.push(chatId);
+       } else if (localChatMeta.lastModified > localChatMeta.syncedAt) {
+         // Local version is newer
+         chatChanges.toUpload.push(chatId);
+       } else {
+         // No changes
+         chatChanges.unchanged.push(chatId);
+       }
+     }
       
       // Identify chats that exist locally but not in cloud
       for (const chatId of Object.keys(localMetadata.chats)) {
-        if (!cloudMetadata.chats[chatId] && 
-            localMetadata.chats[chatId].lastModified > localMetadata.chats[chatId].syncedAt) {
-          chatChanges.toUpload.push(chatId);
+        if (!cloudMetadata.chats[chatId]) {
+          // Skip tombstone entries (already deleted chats)
+          if (localMetadata.chats[chatId].deleted === true) {
+            logToConsole("info", `Chat ${chatId} has a tombstone entry - skipping`);
+            continue;
+          }
+          
+          // If the chat exists locally but not in cloud metadata, we need to handle two cases:
+          // 1. The chat was created locally and needs to be uploaded (if modified since last sync)
+          // 2. The chat was deleted from cloud (on another device) and should be deleted locally
+          
+          if (localMetadata.chats[chatId].lastModified > localMetadata.chats[chatId].syncedAt) {
+            // Case 1: Local chat has changes, upload it
+            chatChanges.toUpload.push(chatId);
+          } else if (localMetadata.lastSyncTime > 0) {
+            // Case 2: Chat was deleted from cloud (on another device)
+            // Only process this if we've synced at least once before
+            chatChanges.toDelete.push(chatId);
+            logToConsole("cleanup", `Marking local chat ${chatId} for deletion - exists locally but not in cloud metadata`);
+          }
         }
       }
       
@@ -954,6 +1043,16 @@ async function syncFromCloud() {
       if (chatChanges.toDownload.length > 0) {
         for (const chatId of chatChanges.toDownload) {
           try {
+            // Skip downloading if this chat has a tombstone entry (meaning it was deleted locally)
+            if (localMetadata.chats[chatId] && localMetadata.chats[chatId].deleted === true) {
+              logToConsole("info", `Skipping download of chat ${chatId} - marked as deleted locally`);
+              // Instead, mark it for deletion from cloud
+              if (!chatChanges.toDelete.includes(chatId)) {
+                chatChanges.toDelete.push(chatId);
+              }
+              continue;
+            }
+            
             const cloudChat = await downloadChatFromCloud(chatId);
             
             if (cloudChat) {
@@ -962,7 +1061,7 @@ async function syncFromCloud() {
               
               if (localChat) {
                 // Both versions exist - check for conflicts
-                if (localMetadata.chats[chatId] && 
+                if (localMetadata.chats[chatId] &&
                     localMetadata.chats[chatId].lastModified > localMetadata.chats[chatId].syncedAt) {
                   // Conflict - need to merge
                   const mergedChat = await mergeChats(localChat, cloudChat);
@@ -1007,16 +1106,50 @@ async function syncFromCloud() {
         }
       }
       
-      // Process deletions (chats that exist in cloud but were deleted locally)
+      // Process deletions (both locally deleted chats and chats deleted in cloud)
       if (chatChanges.toDelete.length > 0) {
         logToConsole("cleanup", `Processing ${chatChanges.toDelete.length} deleted chats`);
         for (const chatId of chatChanges.toDelete) {
           try {
-            await deleteChatFromCloud(chatId);
+            // Check if this is a local or cloud deletion, or a tombstone entry
+            const chatExistsLocally = currentLocalChatIds.has(chatId);
+            const hasTombstone = localMetadata.chats[chatId] && localMetadata.chats[chatId].deleted === true;
+            
+            if (hasTombstone) {
+              // This is a tombstone entry, we should delete it from cloud if it exists there
+              await deleteChatFromCloud(chatId);
+              logToConsole("success", `Deleted chat ${chatId} from cloud based on local tombstone entry`);
+              // Keep the tombstone entry in metadata to prevent future re-downloads
+            } else if (!chatExistsLocally) {
+              // Chat was deleted locally but no tombstone yet, remove it from the cloud
+              // and create a tombstone entry
+              await deleteChatFromCloud(chatId);
+              logToConsole("success", `Deleted chat ${chatId} from cloud (local deletion)`);
+              
+              // Create a tombstone if one doesn't exist
+              if (!hasTombstone) {
+                localMetadata.chats[chatId] = {
+                  deleted: true,
+                  deletedAt: Date.now(),
+                  lastModified: Date.now(),
+                  syncedAt: Date.now()
+                };
+                saveLocalMetadata();
+                logToConsole("info", `Created tombstone entry for chat ${chatId} that was deleted locally`);
+              }
+            } else {
+              // Chat exists locally but was deleted in cloud, delete it locally too
+              logToConsole("info", `Deleting local chat ${chatId} that was removed from cloud`);
+              await deleteLocalChat(chatId);
+              
+              // The deleteLocalChat function already creates a tombstone entry,
+              // so we don't need to manually edit the metadata here
+            }
+            
             // Small delay between deletions
             await new Promise(resolve => setTimeout(resolve, 100));
           } catch (error) {
-            logToConsole("error", `Error deleting chat ${chatId} from cloud`, error);
+            logToConsole("error", `Error processing deletion for chat ${chatId}`, error);
           }
         }
       }
