@@ -1,7 +1,7 @@
-// Chat Sync Extension v1.0.0
-// A complete rewrite of the sync system with per-chat file storage
+// Chat Sync Extension v1.0.1
+// Simplified to use IndexedDB's updatedAt property instead of mutation observers
 
-const EXTENSION_VERSION = '1.0.0';
+const EXTENSION_VERSION = '1.0.1';
 let isConsoleLoggingEnabled = new URLSearchParams(window.location.search).get("log") === "true";
 
 // ==================== CORE DATA STRUCTURES ====================
@@ -34,6 +34,9 @@ let syncConfig = {
   exportThreshold: 10, // percentage
   alertOnSmallerCloud: true
 };
+
+// Track last seen updated times
+let lastSeenUpdates = {};
 
 // ==================== INITIALIZATION ====================
 
@@ -84,13 +87,16 @@ async function initializeExtension() {
   // Load local metadata
   await loadLocalMetadata();
   
+  // Initialize lastSeenUpdates from current chat states
+  await initializeLastSeenUpdates();
+  
   // Check if we should perform initial sync
   if (syncConfig.syncMode === 'sync') {
     queueOperation('initial-sync', syncFromCloud);
   }
   
-  // Start mutation observers
-  startChangeDetection();
+  // Start periodic check for changes 
+  startPeriodicChangeCheck();
   
   // Set up visibility change handler
   setupVisibilityChangeHandler();
@@ -99,6 +105,23 @@ async function initializeExtension() {
   startSyncInterval();
   
   logToConsole("success", "Extension initialization complete");
+}
+
+// Initialize tracking of last seen updates
+async function initializeLastSeenUpdates() {
+  try {
+    const chats = await getAllChatsFromIndexedDB();
+    for (const chat of chats) {
+      if (chat.id && chat.updatedAt) {
+        lastSeenUpdates[chat.id] = chat.updatedAt;
+      }
+    }
+    logToConsole("info", "Initialized last seen updates", { 
+      chatCount: Object.keys(lastSeenUpdates).length 
+    });
+  } catch (error) {
+    logToConsole("error", "Failed to initialize last seen updates", error);
+  }
 }
 
 // ==================== STORAGE & METADATA MANAGEMENT ====================
@@ -217,7 +240,7 @@ async function updateChatMetadata(chatId, isLocalUpdate = true) {
     
     logToConsole("info", `Updated metadata for chat ${chatId}`, {
       lastModified: new Date(localMetadata.chats[chatId].lastModified).toLocaleString(),
-      syncedAt: new Date(localMetadata.chats[chatId].syncedAt).toLocaleString(),
+      syncedAt: localMetadata.chats[chatId].syncedAt ? new Date(localMetadata.chats[chatId].syncedAt).toLocaleString() : 'Never',
       hash: newHash.substring(0, 8) + '...'
     });
   } catch (error) {
@@ -254,106 +277,75 @@ async function generateChatHash(chat) {
 
 // ==================== CHANGE DETECTION ====================
 
-// Mutation observer to detect changes to active chat
-let chatObserver = null;
-
-// Start change detection
-function startChangeDetection() {
-  // Setup IndexedDB event listener for changes (if available)
-  setupIndexedDBChangeListener();
+// Start periodic check for changes in IndexedDB
+function startPeriodicChangeCheck() {
+  // Clear any existing interval
+  if (window.changeCheckInterval) {
+    clearInterval(window.changeCheckInterval);
+  }
   
-  // Watch for DOM changes to detect active chat
-  const bodyObserver = new MutationObserver(throttle(checkForActiveChat, 1000));
-  bodyObserver.observe(document.body, { childList: true, subtree: true });
+  // Set interval for checking changes (every 5 seconds)
+  window.changeCheckInterval = setInterval(checkForChanges, 5000);
   
-  // Initial check for active chat
-  checkForActiveChat();
-  
-  logToConsole("info", "Change detection started");
+  logToConsole("info", "Started periodic change detection");
 }
 
-// Throttle function to limit how often a function can be called
-function throttle(func, limit) {
-  let lastCall = 0;
-  return function(...args) {
-    const now = Date.now();
-    if (now - lastCall >= limit) {
-      lastCall = now;
-      return func.apply(this, args);
-    }
-  };
-}
-
-// Check if active chat container exists and attach observer
-function checkForActiveChat() {
-  const chatContainer = document.querySelector(".pt-8.pb-4.relative");
+// Check for changes in chats by comparing updatedAt timestamps
+async function checkForChanges() {
+  if (document.hidden) return; // Skip if tab is not visible
   
-  if (chatContainer) {
-    if (chatObserver) {
-      chatObserver.disconnect();
+  try {
+    const chats = await getAllChatsFromIndexedDB();
+    const changedChats = [];
+    
+    for (const chat of chats) {
+      if (!chat.id || !chat.updatedAt) continue;
+      
+      // Check if this chat has been updated since we last saw it
+      if (!lastSeenUpdates[chat.id] || chat.updatedAt > lastSeenUpdates[chat.id]) {
+        changedChats.push(chat.id);
+        lastSeenUpdates[chat.id] = chat.updatedAt;
+        
+        // Update metadata
+        await updateChatMetadata(chat.id, true);
+        
+        // Queue for sync
+        queueOperation(`chat-changed-${chat.id}`, () => uploadChatToCloud(chat.id));
+      }
     }
     
-    // Create new observer for the chat container
-    chatObserver = new MutationObserver(throttle(handleChatMutation, 500));
-    chatObserver.observe(chatContainer, { 
-      childList: true, 
-      subtree: true,
-      characterData: true,
-      attributes: true 
-    });
-    
-    logToConsole("info", "Observer attached to active chat container");
+    if (changedChats.length > 0) {
+      logToConsole("info", "Detected changes in chats", {
+        changedChats: changedChats,
+        count: changedChats.length
+      });
+    }
+  } catch (error) {
+    logToConsole("error", "Error checking for changes", error);
   }
 }
 
-// Handle chat mutations
-async function handleChatMutation(mutations) {
-  // Check if any messages were added or modified
-  const messageChanged = mutations.some(mutation => {
-    return mutation.target.classList && 
-           mutation.target.classList.contains("message-index") ||
-           mutation.type === "childList" && 
-           Array.from(mutation.addedNodes).some(node => 
-             node.nodeType === 1 && node.classList && 
-             node.classList.contains("message-index")
-           );
-  });
-  
-  if (messageChanged) {
-    // Get active chat ID
-    const activeChatId = await getActiveChatId();
-    if (activeChatId) {
-      logToConsole("info", `Chat mutation detected in ${activeChatId}`);
-      
-      // Update metadata for this chat
-      await updateChatMetadata(activeChatId, true);
-      
-      // Mark for sync
-      queueOperation('chat-modified', () => uploadChatToCloud(activeChatId));
-    }
-  }
-}
-
-// Setup IndexedDB change listener
-function setupIndexedDBChangeListener() {
-  // Unfortunately, there's no built-in way to listen for IndexedDB changes
-  // We'll need to hook into localStorage changes as a proxy
-  
+// Setup localStorage change listener for settings
+function setupLocalStorageChangeListener() {
   // Override localStorage.setItem to detect changes
   const originalSetItem = localStorage.setItem;
   localStorage.setItem = function(key, value) {
+    // Check if this is a settings change
+    const isSettingsKey = key.startsWith('TM_');
+    const oldValue = localStorage.getItem(key);
+    
     // Call original implementation
     originalSetItem.call(this, key, value);
     
-    // If this is a TM_ key change, update settings metadata
-    if (key.startsWith('TM_')) {
+    // If this is a TM_ key change and the value actually changed, update settings
+    if (isSettingsKey && oldValue !== value) {
       logToConsole("info", `Settings change detected: ${key}`);
       updateSettingsMetadata();
       queueOperation('settings-modified', uploadSettingsToCloud);
     }
   };
   
-  logToConsole("info", "IndexedDB change detection setup");
+  logToConsole("info", "localStorage change detection setup");
 }
 
 // Update settings metadata
@@ -364,7 +356,7 @@ function updateSettingsMetadata() {
 
 // ==================== AWS S3 OPERATIONS ====================
 
-// Get AWS S3 client
+// Get AWS S3 client with proper credentials
 function getS3Client() {
   const bucketName = localStorage.getItem("aws-bucket");
   const awsRegion = localStorage.getItem("aws-region");
@@ -376,10 +368,17 @@ function getS3Client() {
     throw new Error("AWS credentials not configured");
   }
   
-  const awsConfig = {
+  // Create credential object directly to avoid S3 credential provider chain issues
+  const credentials = new AWS.Credentials({
     accessKeyId: awsAccessKey,
-    secretAccessKey: awsSecretKey,
-    region: awsRegion
+    secretAccessKey: awsSecretKey
+  });
+  
+  const awsConfig = {
+    credentials: credentials,
+    region: awsRegion,
+    maxRetries: 3,
+    httpOptions: { timeout: 30000 } // 30 second timeout
   };
   
   if (awsEndpoint) {
@@ -387,7 +386,7 @@ function getS3Client() {
   }
   
   AWS.config.update(awsConfig);
-  return { s3: new AWS.S3(), bucketName };
+  return { s3: new AWS.S3(awsConfig), bucketName };
 }
 
 // Download metadata from cloud
@@ -479,22 +478,25 @@ async function downloadChatFromCloud(chatId) {
       Key: `chats/${chatId}.json`
     };
     
-    const data = await s3.getObject(params).promise();
-    const encryptedContent = new Uint8Array(data.Body);
-    const chatData = await decryptData(encryptedContent);
-    
-    logToConsole("success", `Downloaded chat ${chatId} from cloud`, {
-      messageCount: (chatData.messagesArray || []).length,
-      title: chatData.chatTitle
-    });
-    
-    return chatData;
-  } catch (error) {
-    if (error.code === "NoSuchKey") {
-      logToConsole("info", `Chat ${chatId} not found in cloud`);
-      return null;
+    try {
+      const data = await s3.getObject(params).promise();
+      const encryptedContent = new Uint8Array(data.Body);
+      const chatData = await decryptData(encryptedContent);
+      
+      logToConsole("success", `Downloaded chat ${chatId} from cloud`, {
+        messageCount: (chatData.messagesArray || []).length,
+        title: chatData.chatTitle
+      });
+      
+      return chatData;
+    } catch (error) {
+      if (error.code === "NoSuchKey") {
+        logToConsole("info", `Chat ${chatId} not found in cloud`);
+        return null;
+      }
+      throw error;
     }
-    
+  } catch (error) {
     logToConsole("error", `Error downloading chat ${chatId}`, error);
     throw error;
   }
@@ -726,7 +728,7 @@ async function syncFromCloud() {
           "aws-bucket", "aws-access-key", "aws-secret-key", "aws-region", 
           "aws-endpoint", "backup-interval", "encryption-key",
           "import-size-threshold", "export-size-threshold",
-          "alert-smaller-cloud", "sync-mode"
+          "alert-smaller-cloud", "sync-mode", "chat-sync-metadata"
         ];
         
         for (const [key, value] of Object.entries(cloudSettings)) {
@@ -769,7 +771,8 @@ async function syncFromCloud() {
       
       // Identify chats that exist locally but not in cloud
       for (const chatId of Object.keys(localMetadata.chats)) {
-        if (!cloudMetadata.chats[chatId]) {
+        if (!cloudMetadata.chats[chatId] && 
+            localMetadata.chats[chatId].lastModified > localMetadata.chats[chatId].syncedAt) {
           chatChanges.toUpload.push(chatId);
         }
       }
@@ -809,8 +812,11 @@ async function syncFromCloud() {
                 logToConsole("info", `Created chat ${chatId} from cloud`);
               }
               
-              // Update metadata
+              // Update metadata and last seen updates
               await updateChatMetadata(chatId, false);
+              if (cloudChat.updatedAt) {
+                lastSeenUpdates[chatId] = cloudChat.updatedAt;
+              }
             }
           } catch (error) {
             logToConsole("error", `Error processing download for chat ${chatId}`, error);
@@ -818,11 +824,13 @@ async function syncFromCloud() {
         }
       }
       
-      // Process uploads
+      // Process uploads (with a small delay to avoid credential conflicts)
       if (chatChanges.toUpload.length > 0) {
         for (const chatId of chatChanges.toUpload) {
           try {
             await uploadChatToCloud(chatId);
+            // Small delay between uploads
+            await new Promise(resolve => setTimeout(resolve, 100));
           } catch (error) {
             logToConsole("error", `Error uploading chat ${chatId}`, error);
           }
@@ -1011,40 +1019,6 @@ async function saveChatToIndexedDB(chat) {
       };
     };
   });
-}
-
-// Get active chat ID
-async function getActiveChatId() {
-  // First try to get it from the DOM
-  try {
-    // Check for various possible DOM indicators of active chat
-    const chatTitle = document.querySelector(".text-ellipsis.overflow-hidden"); // Chat title element
-    if (chatTitle && chatTitle.dataset && chatTitle.dataset.chatId) {
-      return chatTitle.dataset.chatId;
-    }
-    
-    // Try getting it from the URL
-    const urlMatch = window.location.href.match(/chat\/([^\/]+)/);
-    if (urlMatch && urlMatch[1]) {
-      return urlMatch[1];
-    }
-  } catch (e) {
-    logToConsole("error", "Error getting active chat ID from DOM", e);
-  }
-  
-  // If DOM method fails, use the most recently updated chat
-  try {
-    const allChats = await getAllChatsFromIndexedDB();
-    if (allChats.length === 0) return null;
-    
-    // Sort by updatedAt (most recent first)
-    allChats.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    
-    return allChats[0].id;
-  } catch (e) {
-    logToConsole("error", "Error getting active chat ID from IndexedDB", e);
-    return null;
-  }
 }
 
 // ==================== OPERATION QUEUE ====================
@@ -1334,555 +1308,6 @@ function updateSyncStatusUI() {
     messageElement.textContent = lastSync ? `Synced at ${lastSync}` : "Synced";
   } else {
     messageElement.textContent = "Ready";
-  }
-}
-
-// Create sync button
-function insertSyncButton() {
-  // Create button element if it doesn't exist
-  if (document.querySelector('[data-element-id="cloud-sync-button"]')) return;
-  
-  const cloudSyncBtn = document.createElement("button");
-  cloudSyncBtn.setAttribute("data-element-id", "cloud-sync-button");
-  cloudSyncBtn.className =
-    "cursor-default group flex items-center justify-center p-1 text-sm font-medium flex-col group focus:outline-0 focus:text-white text-white/70";
-  
-  const cloudIconSVG = `
-    <svg class="w-6 h-6 flex-shrink-0" width="24px" height="24px" fill="none" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-      <path fill-rule="evenodd" clip-rule="evenodd" d="M19 9.76c-.12-3.13-2.68-5.64-5.83-5.64-2.59 0-4.77 1.68-5.53 4.01-.19-.03-.39-.04-.57-.04-2.45 0-4.44 1.99-4.44 4.44 0 2.45 1.99 4.44 4.44 4.44h11.93c2.03 0 3.67-1.64 3.67-3.67 0-1.95-1.52-3.55-3.44-3.65zm-5.83-3.64c2.15 0 3.93 1.6 4.21 3.68l.12.88.88.08c1.12.11 1.99 1.05 1.99 2.19 0 1.21-.99 2.2-2.2 2.2H7.07c-1.64 0-2.97-1.33-2.97-2.97 0-1.64 1.33-2.97 2.97-2.97.36 0 .72.07 1.05.2l.8.32.33-.8c.59-1.39 1.95-2.28 3.45-2.28z" fill="currentColor"></path>
-      <path fill-rule="evenodd" clip-rule="evenodd" d="M12 15.33v-5.33M9.67 12.33L12 14.67l2.33-2.34" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path>
-    </svg>
-  `;
-  
-  const textSpan = document.createElement("span");
-  textSpan.className = "font-normal self-stretch text-center text-xs leading-4 md:leading-none";
-  textSpan.innerText = "Sync";
-  
-  const iconSpan = document.createElement("span");
-  iconSpan.className = "block group-hover:bg-white/30 w-[35px] h-[35px] transition-all rounded-lg flex items-center justify-center group-hover:text-white/90";
-  iconSpan.innerHTML = cloudIconSVG;
-  
-  cloudSyncBtn.appendChild(iconSpan);
-  cloudSyncBtn.appendChild(textSpan);
-  
-  // Insert button into DOM (look for 'teams' button and insert after it)
-  function insertButton() {
-    const teamsButton = document.querySelector('[data-element-id="workspace-tab-teams"]');
-    if (teamsButton && teamsButton.parentNode) {
-      teamsButton.parentNode.insertBefore(cloudSyncBtn, teamsButton.nextSibling);
-      return true;
-    }
-    return false;
-  }
-  
-  // Try to insert button immediately
-  if (insertButton()) {
-    logToConsole("info", "Sync button inserted into DOM");
-  } else {
-    // If not possible yet, observe DOM changes
-    const observer = new MutationObserver((mutations) => {
-      if (insertButton()) {
-        observer.disconnect();
-        logToConsole("info", "Sync button inserted into DOM (via observer)");
-      }
-    });
-    
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-    });
-    
-    // Also try periodically
-    let attempts = 0;
-    const maxAttempts = 10;
-    const interval = setInterval(() => {
-      if (insertButton() || attempts >= maxAttempts) {
-        clearInterval(interval);
-      }
-      attempts++;
-    }, 1000);
-  }
-  
-  // Add click handler to open settings modal
-  cloudSyncBtn.addEventListener("click", openSyncModal);
-}
-
-// Create and open sync settings modal
-function openSyncModal() {
-  // Don't create multiple instances
-  if (document.querySelector('[data-element-id="sync-modal"]')) return;
-  
-  // Create modal element
-  const modalElement = document.createElement("div");
-  modalElement.setAttribute("data-element-id", "sync-modal");
-  modalElement.className = "fixed inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-center z-[60] p-4 overflow-y-auto";
-  
-  modalElement.innerHTML = `
-    <div class="inline-block w-full align-bottom bg-white dark:bg-zinc-950 rounded-lg text-left shadow-xl transform transition-all sm:my-8 sm:p-6 sm:align-middle pt-4 overflow-hidden sm:max-w-lg">
-      <div class="text-gray-800 dark:text-white text-left text-sm">
-        <div class="flex justify-center items-center mb-3">
-          <h3 class="text-center text-xl font-bold">Cloud Sync Settings</h3>
-          <button class="ml-2 text-blue-600 text-lg hint--bottom-left hint--rounded hint--large" 
-            aria-label="Fill form & Save. If you are using Amazon S3 - fill in S3 Bucket Name, AWS Region, AWS Access Key, AWS Secret Key and Encryption key.&#10;&#10;Changes are synced automatically between devices when set to Sync mode.">ⓘ</button>
-        </div>
-        
-        <div class="space-y-3">
-          <!-- Sync Mode -->
-          <div class="flex items-center space-x-4 mb-4 bg-gray-100 dark:bg-zinc-800 p-3 rounded-lg">
-            <label class="text-sm font-medium text-gray-700 dark:text-gray-400">Mode:</label>
-            <label class="inline-flex items-center">
-              <input type="radio" name="sync-mode" value="sync" class="form-radio text-blue-600">
-              <span class="ml-2">Sync</span>
-              <button class="ml-1 text-blue-600 text-lg hint--top-right hint--rounded hint--medium" 
-                aria-label="Automatically syncs data between devices. When enabled, data will be imported from cloud on app start.">ⓘ</button>
-            </label>
-            <label class="inline-flex items-center">
-              <input type="radio" name="sync-mode" value="backup" class="form-radio text-blue-600">
-              <span class="ml-2">Backup</span>
-              <button class="ml-1 text-blue-600 text-lg hint--top-left hint--rounded hint--medium" 
-                aria-label="Only creates backups. No automatic import from cloud on app start. Use Import button to manually restore data.">ⓘ</button>
-            </label>
-          </div>
-          
-          <!-- AWS Credentials -->
-          <div class="bg-gray-100 dark:bg-zinc-800 p-3 rounded-lg space-y-3">
-            <div class="flex space-x-4">
-              <div class="w-2/3">
-                <label for="aws-bucket" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Bucket Name <span class="text-red-500">*</span></label>
-                <input id="aws-bucket" name="aws-bucket" type="text" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
-              </div>
-              <div class="w-1/3">
-                <label for="aws-region" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Region <span class="text-red-500">*</span></label>
-                <input id="aws-region" name="aws-region" type="text" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
-              </div>
-            </div>
-            <div>
-              <label for="aws-access-key" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Access Key <span class="text-red-500">*</span></label>
-              <input id="aws-access-key" name="aws-access-key" type="password" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
-            </div>
-            <div>
-              <label for="aws-secret-key" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Secret Key <span class="text-red-500">*</span></label>
-              <input id="aws-secret-key" name="aws-secret-key" type="password" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
-            </div>
-            <div>
-              <label for="aws-endpoint" class="block text-sm font-medium text-gray-700 dark:text-gray-400">
-                S3 Compatible Storage Endpoint
-                <button class="ml-1 text-blue-600 text-lg hint--top hint--rounded hint--medium" 
-                  aria-label="For Amazon AWS, leave this blank. For S3 compatible cloud services like Cloudflare, iDrive and the likes, populate this.">ⓘ</button>
-              </label>
-              <input id="aws-endpoint" name="aws-endpoint" type="text" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off">
-            </div>
-            <div class="flex space-x-4">
-              <div class="w-1/2">
-                <label for="backup-interval" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Sync Interval
-                <button class="ml-1 text-blue-600 text-lg hint--top-right hint--rounded hint--medium" 
-                  aria-label="How often to check for changes (in seconds). Minimum 15 seconds, Default: 60 seconds">ⓘ</button></label>
-                <input id="backup-interval" name="backup-interval" type="number" min="15" placeholder="Default: 60" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
-              </div>
-              <div class="w-1/2">
-                <label for="encryption-key" class="block text-sm font-medium text-gray-700 dark:text-gray-400">
-                  Encryption Key <span class="text-red-500">*</span>
-                  <button class="ml-1 text-blue-600 text-lg hint--top-left hint--rounded hint--medium" 
-                    aria-label="Choose a secure 8+ character string. This is to encrypt the backup files before uploading to cloud.">ⓘ</button>
-                </label>
-                <input id="encryption-key" name="encryption-key" type="password" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
-              </div>
-            </div>
-          </div>
-          
-          <!-- Sync thresholds -->
-          <div class="bg-gray-100 dark:bg-zinc-800 p-3 rounded-lg">
-            <label class="block text-sm font-medium text-gray-700 dark:text-gray-400">
-              Sync Safety Checks
-              <button class="ml-1 text-blue-600 text-lg hint--top hint--rounded hint--large" 
-                aria-label="This is to prevent unintentional corruption of app data. When syncing, file sizes are compared and if the difference percentage exceeds the configured threshold, you are asked to provide confirmation.">ⓘ</button>
-            </label>
-            <div class="mt-1 flex space-x-4">
-              <div class="w-1/2">
-                <label for="import-threshold" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Import (%)</label>
-                <input id="import-threshold" name="import-threshold" type="number" step="0.1" min="0" placeholder="Default: 1" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off">
-              </div>
-              <div class="w-1/2">
-                <label for="export-threshold" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Export (%)</label>
-                <input id="export-threshold" name="export-threshold" type="number" step="0.1" min="0" placeholder="Default: 10" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off">
-              </div>
-            </div>
-            <div class="mt-2 flex items-center">
-              <input type="checkbox" id="alert-smaller-cloud" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
-              <label for="alert-smaller-cloud" class="ml-2 block text-sm text-gray-700 dark:text-gray-400">
-                Alert if cloud backup is smaller during import
-              </label>
-            </div>
-          </div>
-          
-          <!-- Console logging -->
-          <div class="flex items-center justify-end mb-4 space-x-2">
-            <span class="text-sm text-gray-600 dark:text-gray-400">
-              Console Logging
-              <button class="ml-1 text-blue-600 text-lg hint--top-left hint--rounded hint--medium" 
-                aria-label="Enable detailed logging in Browser console for troubleshooting.">ⓘ</button>
-            </span>
-            <input type="checkbox" id="console-logging-toggle" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded cursor-pointer">
-          </div>
-          
-          <!-- Action buttons -->
-          <div class="flex justify-between space-x-2 mt-4">
-            <div>
-              <button id="save-settings-btn" type="button" class="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:bg-gray-400 disabled:cursor-default">
-                Save Settings
-              </button>
-            </div>
-            <div class="flex space-x-2">
-              <button id="sync-now-btn" type="button" class="inline-flex items-center px-2 py-1 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-gray-400 disabled:cursor-default">
-                <span>Sync Now</span>
-              </button>
-              <button id="create-snapshot-btn" type="button" class="inline-flex items-center px-2 py-1 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:bg-gray-400 disabled:cursor-default">
-                <span>Snapshot</span>
-              </button>
-              <button id="close-modal-btn" type="button" class="inline-flex items-center px-2 py-1 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
-                <span>Close</span>
-              </button>
-            </div>
-          </div>
-          
-          <!-- Status message -->
-          <div class="text-center mt-4">
-            <span id="last-sync-msg"></span>
-          </div>
-          <div id="action-msg" class="text-center"></div>
-        </div>
-      </div>
-    </div>
-  `;
-  
-  document.body.appendChild(modalElement);
-  
-  // Load existing values
-  const loadExistingValues = () => {
-    // AWS credentials
-    document.getElementById("aws-bucket").value = localStorage.getItem("aws-bucket") || "";
-    document.getElementById("aws-region").value = localStorage.getItem("aws-region") || "";
-    document.getElementById("aws-access-key").value = localStorage.getItem("aws-access-key") || "";
-    document.getElementById("aws-secret-key").value = localStorage.getItem("aws-secret-key") || "";
-    document.getElementById("aws-endpoint").value = localStorage.getItem("aws-endpoint") || "";
-    
-    // Sync settings
-    document.getElementById("backup-interval").value = localStorage.getItem("backup-interval") || "60";
-    document.getElementById("encryption-key").value = localStorage.getItem("encryption-key") || "";
-    document.getElementById("import-threshold").value = localStorage.getItem("import-size-threshold") || "1";
-    document.getElementById("export-threshold").value = localStorage.getItem("export-size-threshold") || "10";
-    
-    // Sync mode
-    const syncMode = localStorage.getItem("sync-mode") || "sync";
-    document.querySelector(`input[name="sync-mode"][value="${syncMode}"]`).checked = true;
-    
-    // Alert on smaller cloud
-    document.getElementById("alert-smaller-cloud").checked = syncConfig.alertOnSmallerCloud;
-    
-    // Console logging
-    document.getElementById("console-logging-toggle").checked = isConsoleLoggingEnabled;
-    
-    // Last sync message
-    const lastSync = localStorage.getItem("last-cloud-sync");
-    if (lastSync) {
-      document.getElementById("last-sync-msg").textContent = `Last sync done at ${lastSync}`;
-    }
-  };
-  
-  loadExistingValues();
-  
-  // Add event listeners
-  document.getElementById("save-settings-btn").addEventListener("click", saveSettings);
-  document.getElementById("sync-now-btn").addEventListener("click", syncNow);
-  document.getElementById("create-snapshot-btn").addEventListener("click", createSnapshot);
-  document.getElementById("close-modal-btn").addEventListener("click", closeModal);
-  document.getElementById("console-logging-toggle").addEventListener("change", toggleConsoleLogging);
-  
-  // Close on outside click
-  modalElement.addEventListener("click", (e) => {
-    if (e.target === modalElement) {
-      closeModal();
-    }
-  });
-  
-  // Update button states
-  updateSettingsButtonState();
-  
-  // Function to save settings
-  function saveSettings() {
-    const bucketName = document.getElementById("aws-bucket").value.trim();
-    const region = document.getElementById("aws-region").value.trim();
-    const accessKey = document.getElementById("aws-access-key").value.trim();
-    const secretKey = document.getElementById("aws-secret-key").value.trim();
-    const endpoint = document.getElementById("aws-endpoint").value.trim();
-    const backupInterval = document.getElementById("backup-interval").value;
-    const encryptionKey = document.getElementById("encryption-key").value.trim();
-    const importThreshold = document.getElementById("import-threshold").value;
-    const exportThreshold = document.getElementById("export-threshold").value;
-    const selectedMode = document.querySelector('input[name="sync-mode"]:checked').value;
-    const alertOnSmallerCloud = document.getElementById("alert-smaller-cloud").checked;
-    
-    // Validate settings
-    if (!bucketName || !region || !accessKey || !secretKey || !encryptionKey) {
-      showMessage("Please fill in all required fields", "error");
-      return;
-    }
-    
-    if (parseInt(backupInterval) < 15) {
-      showMessage("Sync interval must be at least 15 seconds", "error");
-      return;
-    }
-    
-    if (encryptionKey.length < 8) {
-      showMessage("Encryption key must be at least 8 characters long", "error");
-      return;
-    }
-    
-    // Save settings to localStorage
-    localStorage.setItem("aws-bucket", bucketName);
-    localStorage.setItem("aws-region", region);
-    localStorage.setItem("aws-access-key", accessKey);
-    localStorage.setItem("aws-secret-key", secretKey);
-    localStorage.setItem("aws-endpoint", endpoint);
-    localStorage.setItem("backup-interval", backupInterval);
-    localStorage.setItem("encryption-key", encryptionKey);
-    localStorage.setItem("import-size-threshold", importThreshold || "1");
-    localStorage.setItem("export-size-threshold", exportThreshold || "10");
-    localStorage.setItem("sync-mode", selectedMode);
-    localStorage.setItem("alert-smaller-cloud", alertOnSmallerCloud.toString());
-    
-    // Update sync config
-    syncConfig.syncMode = selectedMode;
-    syncConfig.syncInterval = parseInt(backupInterval);
-    syncConfig.importThreshold = parseFloat(importThreshold || "1");
-    syncConfig.exportThreshold = parseFloat(exportThreshold || "10");
-    syncConfig.alertOnSmallerCloud = alertOnSmallerCloud;
-    
-    // Restart sync interval
-    startSyncInterval();
-    
-    // Show success message
-    showMessage("Settings saved successfully", "success");
-    
-    // If in sync mode, trigger a sync
-    if (selectedMode === "sync") {
-      queueOperation("settings-save-sync", syncFromCloud);
-    }
-  }
-  
-  // Function to trigger sync now
-  function syncNow() {
-    queueOperation("manual-sync", syncFromCloud);
-    showMessage("Sync started", "info");
-  }
-  
-  // Function to create snapshot
-  async function createSnapshot() {
-    const snapshotBtn = document.getElementById("create-snapshot-btn");
-    snapshotBtn.disabled = true;
-    
-    try {
-      logToConsole("snapshot", "Starting snapshot creation...");
-      
-      // Generate timestamp for snapshot name
-      const now = new Date();
-      const timestamp = 
-        now.getFullYear() +
-        String(now.getMonth() + 1).padStart(2, "0") +
-        String(now.getDate()).padStart(2, "0") +
-        "T" +
-        String(now.getHours()).padStart(2, "0") +
-        String(now.getMinutes()).padStart(2, "0") +
-        String(now.getSeconds()).padStart(2, "0");
-      
-      // Get all chats
-      const chats = await getAllChatsFromIndexedDB();
-      
-      // Get settings
-      const settings = {};
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key.startsWith('TM_')) {
-          settings[key] = localStorage.getItem(key);
-        }
-      }
-      
-      // Create snapshot data
-      const snapshotData = {
-        timestamp,
-        chats,
-        settings,
-        metadata: localMetadata
-      };
-      
-      // Encrypt data
-      const encryptedData = await encryptData(snapshotData);
-      
-      // Compress with JSZip
-      const jszip = await loadJSZip();
-      const zip = new jszip();
-      zip.file(`Snapshot_${timestamp}.json`, encryptedData, {
-        compression: "DEFLATE",
-        compressionOptions: { level: 9 },
-        binary: true
-      });
-      
-      const compressedContent = await zip.generateAsync({ type: "blob" });
-      
-      // Upload to S3
-      const { s3, bucketName } = getS3Client();
-      const putParams = {
-        Bucket: bucketName,
-        Key: `snapshots/Snapshot_${timestamp}.zip`,
-        Body: compressedContent,
-        ContentType: "application/zip",
-        ServerSideEncryption: "AES256"
-      };
-      
-      await s3.putObject(putParams).promise();
-      
-      showMessage(`Snapshot created: Snapshot_${timestamp}.zip`, "success");
-      logToConsole("success", `Snapshot created successfully: Snapshot_${timestamp}.zip`);
-    } catch (error) {
-      logToConsole("error", "Snapshot creation failed:", error);
-      showMessage(`Error creating snapshot: ${error.message}`, "error");
-    } finally {
-      snapshotBtn.disabled = false;
-    }
-  }
-  
-  // Function to close modal
-  function closeModal() {
-    document.querySelector('[data-element-id="sync-modal"]')?.remove();
-  }
-  
-  // Function to toggle console logging
-  function toggleConsoleLogging(e) {
-    isConsoleLoggingEnabled = e.target.checked;
-    
-    if (isConsoleLoggingEnabled) {
-      logToConsole("info", `Chat Sync Extension v${EXTENSION_VERSION}`);
-      const url = new URL(window.location);
-      url.searchParams.set("log", "true");
-      window.history.replaceState({}, "", url);
-    } else {
-      const url = new URL(window.location);
-      url.searchParams.delete("log");
-      window.history.replaceState({}, "", url);
-    }
-  }
-  
-  // Function to show message
-  function showMessage(message, type = "info") {
-    const msgElement = document.getElementById("action-msg");
-    if (!msgElement) return;
-    
-    msgElement.textContent = message;
-    
-    // Set color based on type
-    switch (type) {
-      case "error":
-        msgElement.style.color = "#EF4444";
-        break;
-      case "success":
-        msgElement.style.color = "#10B981";
-        break;
-      default:
-        msgElement.style.color = "white";
-    }
-    
-    // Clear after 3 seconds
-    setTimeout(() => {
-      if (msgElement.textContent === message) {
-        msgElement.textContent = "";
-      }
-    }, 3000);
-  }
-  
-  // Function to update settings button state
-  function updateSettingsButtonState() {
-    const saveButton = document.getElementById("save-settings-btn");
-    const syncButton = document.getElementById("sync-now-btn");
-    const snapshotButton = document.getElementById("create-snapshot-btn");
-    
-    // Get form values
-    const bucketName = document.getElementById("aws-bucket").value.trim();
-    const region = document.getElementById("aws-region").value.trim();
-    const accessKey = document.getElementById("aws-access-key").value.trim();
-    const secretKey = document.getElementById("aws-secret-key").value.trim();
-    const backupInterval = document.getElementById("backup-interval").value;
-    const encryptionKey = document.getElementById("encryption-key").value.trim();
-    
-    // Check if all required fields are filled
-    const hasRequiredFields = 
-      bucketName && 
-      region && 
-      accessKey && 
-      secretKey && 
-      backupInterval && 
-      parseInt(backupInterval) >= 15 && 
-      encryptionKey && 
-      encryptionKey.length >= 8;
-    
-    // Update button states
-    saveButton.disabled = !hasRequiredFields;
-    syncButton.disabled = !hasRequiredFields;
-    snapshotButton.disabled = !hasRequiredFields;
-  }
-  
-  // Add input listeners to update button state
-  const inputIds = ["aws-bucket", "aws-region", "aws-access-key", "aws-secret-key", 
-                    "backup-interval", "encryption-key"];
-  inputIds.forEach(id => {
-    document.getElementById(id).addEventListener("input", updateSettingsButtonState);
-  });
-}
-
-// ==================== LOGGING ====================
-
-// Log to console with type and timestamp
-function logToConsole(type, message, data = null) {
-  if (!isConsoleLoggingEnabled) return;
-  
-  const timestamp = new Date().toISOString();
-  const icons = {
-    info: "ℹ️",
-    success: "✅",
-    warning: "⚠️",
-    error: "❌",
-    start: "🔄",
-    end: "🏁",
-    upload: "⬆️",
-    download: "⬇️",
-    cleanup: "🧹",
-    snapshot: "📸",
-    encrypt: "🔐",
-    decrypt: "🔓",
-    progress: "📊",
-    time: "⏰",
-    wait: "⏳",
-    pause: "⏸️",
-    resume: "▶️",
-    visibility: "👁️",
-    active: "📱",
-    calendar: "📅",
-    tag: "🏷️",
-    stop: "🛑",
-    skip: "⏩",
-  };
-  
-  const icon = icons[type] || "ℹ️";
-  const logMessage = `${icon} [Chat Sync v${EXTENSION_VERSION}] ${message}`;
-  
-  switch (type) {
-    case "error":
-      console.error(logMessage, data);
-      break;
-    case "warning":
-      console.warn(logMessage, data);
-      break;
-    default:
-      console.log(logMessage, data);
   }
 }
 
