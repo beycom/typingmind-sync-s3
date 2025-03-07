@@ -47,7 +47,7 @@ function logToConsole(type, message, data = null) {
   const timestamp = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});  const icons = {
     info: "ℹ️",
     success: "✅",
-    warning: "⚠️",
+    warning: "⚠️⚠️⚠️",
     error: "❌",
     start: "🔄",
     end: "🏁",
@@ -348,7 +348,7 @@ function startPeriodicChangeCheck() {
   }
   
   // Set interval for checking changes (every 5 seconds)
-  window.changeCheckInterval = setInterval(checkForChanges, 5000);
+  window.changeCheckInterval = setInterval(checkForChanges, 2500);
   
   logToConsole("info", "Started periodic change detection (checking every 5 seconds)");
 }
@@ -383,6 +383,7 @@ async function checkForChanges() {
         count: changedChats.length
       });
     }
+    else {logToConsole("warning", "No changes detected in chats");}
   } catch (error) {
     logToConsole("error", "Error checking for changes", error);
   }
@@ -495,7 +496,7 @@ async function downloadCloudMetadata() {
 
 // Upload metadata to cloud
 async function uploadCloudMetadata(metadata) {
-  logToConsole("upload", "Uploading metadata.json to cloud");
+  // logToConsole("upload", "Uploading metadata.json to cloud");
   
   try {
     const { s3, bucketName } = getS3Client();
