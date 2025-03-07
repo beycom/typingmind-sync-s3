@@ -658,59 +658,66 @@ async function downloadSettingsFromCloud() {
 
 // Upload settings to cloud
 async function uploadSettingsToCloud() {
-  logToConsole("upload", "Uploading settings.json to cloud");
-  
-  try {
-    const { s3, bucketName } = getS3Client();
+    logToConsole("upload", "Uploading settings.json to cloud");
     
-    // Get settings data
-    const settingsData = {};
-    
-    // Extract all TM_ keys from localStorage
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key.startsWith('TM_')) {
-        settingsData[key] = localStorage.getItem(key);
+    try {
+      const { s3, bucketName } = getS3Client();
+      
+      // Get ALL localStorage data
+      const settingsData = {};
+      
+      // Extract ALL keys from localStorage (not just TM_ keys)
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        // Exclude the AWS credentials and a few technical keys for security
+        const excludeKeys = [
+          "aws-access-key", "aws-secret-key", "encryption-key", 
+          "aws-endpoint", "aws-region", "aws-bucket"
+        ];
+        
+        if (!excludeKeys.includes(key)) {
+          settingsData[key] = localStorage.getItem(key);
+        }
       }
+      
+      // Encrypt settings data
+      const encryptedData = await encryptData(settingsData);
+      
+      // Upload to S3
+      const params = {
+        Bucket: bucketName,
+        Key: "settings.json",
+        Body: encryptedData,
+        ContentType: "application/json",
+        ServerSideEncryption: "AES256"
+      };
+      
+      await s3.putObject(params).promise();
+      
+      logToConsole("success", "Uploaded ALL localStorage settings to cloud", {
+        settingsCount: Object.keys(settingsData).length
+      });
+      
+      // Update metadata
+      localMetadata.settings.syncedAt = Date.now();
+      saveLocalMetadata();
+      
+      // Update cloud metadata
+      const cloudMetadata = await downloadCloudMetadata();
+      cloudMetadata.settings = {
+        lastModified: Date.now(),
+        syncedAt: Date.now()
+      };
+      
+      await uploadCloudMetadata(cloudMetadata);
+      
+      return true;
+    } catch (error) {
+      logToConsole("error", "Error uploading settings", error);
+      throw error;
     }
-    
-    // Encrypt settings data
-    const encryptedData = await encryptData(settingsData);
-    
-    // Upload to S3
-    const params = {
-      Bucket: bucketName,
-      Key: "settings.json",
-      Body: encryptedData,
-      ContentType: "application/json",
-      ServerSideEncryption: "AES256"
-    };
-    
-    await s3.putObject(params).promise();
-    
-    logToConsole("success", "Uploaded settings to cloud", {
-      settingsCount: Object.keys(settingsData).length
-    });
-    
-    // Update metadata
-    localMetadata.settings.syncedAt = Date.now();
-    saveLocalMetadata();
-    
-    // Update cloud metadata
-    const cloudMetadata = await downloadCloudMetadata();
-    cloudMetadata.settings = {
-      lastModified: Date.now(),
-      syncedAt: Date.now()
-    };
-    
-    await uploadCloudMetadata(cloudMetadata);
-    
-    return true;
-  } catch (error) {
-    logToConsole("error", "Error uploading settings", error);
-    throw error;
   }
-}
+  
 
 // ==================== SYNC OPERATIONS ====================
 
@@ -784,28 +791,27 @@ async function syncFromCloud() {
       // Download settings
       const cloudSettings = await downloadSettingsFromCloud();
       
-      // Apply settings if they exist
-      if (cloudSettings) {
-        // Apply each setting (preserving specific local settings)
+// Apply settings if they exist
+    if (cloudSettings) {
+        // Apply each setting (preserving only security-related keys)
         const preserveKeys = [
-          "aws-bucket", "aws-access-key", "aws-secret-key", "aws-region", 
-          "aws-endpoint", "backup-interval", "encryption-key",
-          "import-size-threshold", "export-size-threshold",
-          "alert-smaller-cloud", "sync-mode", "chat-sync-metadata"
+        "aws-bucket", "aws-access-key", "aws-secret-key", "aws-region", 
+        "aws-endpoint", "encryption-key"
         ];
         
         for (const [key, value] of Object.entries(cloudSettings)) {
-          if (!preserveKeys.includes(key)) {
+        if (!preserveKeys.includes(key)) {
             localStorage.setItem(key, value);
-          }
+        }
         }
         
         // Update local metadata
         localMetadata.settings.syncedAt = cloudMetadata.settings.lastModified;
         saveLocalMetadata();
         
-        logToConsole("success", "Applied settings from cloud");
-      }
+        logToConsole("success", "Applied ALL localStorage settings from cloud");
+    }
+  
     }
     
     // Check for chat changes
