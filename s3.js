@@ -842,10 +842,12 @@ async function syncFromCloud() {
       for (const [chatId, cloudChatMeta] of Object.entries(cloudMetadata.chats)) {
         const localChatMeta = localMetadata.chats[chatId];
         
-        if (!localChatMeta || 
-          cloudChatMeta.lastModified >= localChatMeta.syncedAt || 
-          (cloudChatMeta.hash && localChatMeta.hash && cloudChatMeta.hash !== localChatMeta.hash)) {
-        // Cloud version is newer or different
+        if (!localChatMeta ||
+                  // First check hashes if available
+                  (cloudChatMeta.hash && localChatMeta.hash && cloudChatMeta.hash !== localChatMeta.hash) ||
+                  // Fall back to timestamp comparison only if hashes aren't available
+                  (!cloudChatMeta.hash || !localChatMeta.hash) && cloudChatMeta.lastModified >= localChatMeta.syncedAt) {
+                // Cloud version is different or newer
         chatChanges.toDownload.push(chatId);
       } else if (localChatMeta.lastModified > localChatMeta.syncedAt) {
           // Local version is newer
