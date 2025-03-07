@@ -348,7 +348,7 @@ function startPeriodicChangeCheck() {
   }
   
   // Set interval for checking changes (every 15 seconds)
-  window.changeCheckInterval = setInterval(checkForChanges, 15000);
+  window.changeCheckInterval = setInterval(checkForChanges, 5000);
   
   logToConsole("info", "Started periodic change detection (checking every 15 seconds)");
 }
