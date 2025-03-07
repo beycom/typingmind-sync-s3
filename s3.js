@@ -395,7 +395,7 @@ function setupLocalStorageChangeListener() {
   localStorage.setItem = function(key, value) {
     // Check if this is a settings change
     const excludeKeys = [
-      "chat-sync-metadata", "last-cloud-sync", "activeTabBackupRunning"
+      "chat-sync-metadata", "last-cloud-sync", "activeTabBackupRunning", "TM_useDraftContent"
     ];
     const oldValue = localStorage.getItem(key);
     
