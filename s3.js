@@ -13,7 +13,7 @@ function showMobileDebug(message, isError = false) {
     if (!document.getElementById('mobile-debug')) {
       const debugEl = document.createElement('div');
       debugEl.id = 'mobile-debug';
-      debugEl.style.cssText = 'position:fixed; bottom:10px; left:10px; right:10px; max-height:250px; overflow-y:auto; background:rgba(0,0,0,0.8); color:white; z-index:9999; padding:10px; border-radius:5px; font-size:12px;';
+      debugEl.style.cssText = 'position:fixed; bottom:100px; left:10px; right:10px; max-height:250px; overflow-y:auto; background:rgba(0,0,0,0.8); color:white; z-index:9999; padding:10px; border-radius:5px; font-size:12px;';
       document.body.appendChild(debugEl);
     }
     
