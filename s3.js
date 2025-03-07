@@ -347,9 +347,9 @@ function startPeriodicChangeCheck() {
   }
   
   // Set interval for checking changes (every 5 seconds)
-  window.changeCheckInterval = setInterval(checkForChanges, 3000);
+  window.changeCheckInterval = setInterval(checkForChanges, 5000);
   
-  logToConsole("info", "Started periodic change detection (checking every 3 seconds)");
+  logToConsole("info", "Started periodic change detection (checking every 5 seconds)");
 }
 
 // Check for changes in chats by comparing updatedAt timestamps
@@ -841,10 +841,12 @@ async function syncFromCloud() {
       for (const [chatId, cloudChatMeta] of Object.entries(cloudMetadata.chats)) {
         const localChatMeta = localMetadata.chats[chatId];
         
-        if (!localChatMeta || cloudChatMeta.lastModified > localChatMeta.syncedAt) {
-          // Cloud version is newer
-          chatChanges.toDownload.push(chatId);
-        } else if (localChatMeta.lastModified > localChatMeta.syncedAt) {
+        if (!localChatMeta || 
+          cloudChatMeta.lastModified > localChatMeta.syncedAt ||
+          cloudChatMeta.hash !== localChatMeta.hash) {
+        // Cloud version is newer or different
+        chatChanges.toDownload.push(chatId);
+      } else if (localChatMeta.lastModified > localChatMeta.syncedAt) {
           // Local version is newer
           chatChanges.toUpload.push(chatId);
         } else {
