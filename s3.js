@@ -174,12 +174,16 @@ async function initializeLastSeenUpdates() {
   try {
     const chats = await getAllChatsFromIndexedDB();
     for (const chat of chats) {
-      if (chat.id && chat.updatedAt) {
-        lastSeenUpdates[chat.id] = chat.updatedAt;
+      if (chat.id) {
+        const chatHash = await generateChatHash(chat);
+        lastSeenUpdates[chat.id] = {
+          hash: chatHash,
+          timestamp: chat.updatedAt || 0
+        };
       }
     }
-    logToConsole("info", "Initialized last seen updates", { 
-      chatCount: Object.keys(lastSeenUpdates).length 
+    logToConsole("info", "Initialized last seen updates", {
+      chatCount: Object.keys(lastSeenUpdates).length
     });
   } catch (error) {
     logToConsole("error", "Failed to initialize last seen updates", error);
@@ -353,7 +357,7 @@ function startPeriodicChangeCheck() {
   logToConsole("info", "Started periodic change detection (checking every 5 seconds)");
 }
 
-// Check for changes in chats by comparing updatedAt timestamps
+// Check for changes in chats by comparing hash first, then timestamps
 async function checkForChanges() {
   if (document.hidden) return; // Skip if tab is not visible
   
@@ -362,12 +366,23 @@ async function checkForChanges() {
     const changedChats = [];
     
     for (const chat of chats) {
-      if (!chat.id || !chat.updatedAt) continue;
+      if (!chat.id) continue;
+      
+      // Get current chat hash
+      const currentHash = await generateChatHash(chat);
       
       // Check if this chat has been updated since we last saw it
-      if (!lastSeenUpdates[chat.id] || chat.updatedAt > lastSeenUpdates[chat.id]) {
+      if (!lastSeenUpdates[chat.id] ||
+          currentHash !== lastSeenUpdates[chat.id].hash ||
+          (currentHash === lastSeenUpdates[chat.id].hash && chat.updatedAt > lastSeenUpdates[chat.id].timestamp)) {
+        
         changedChats.push(chat.id);
-        lastSeenUpdates[chat.id] = chat.updatedAt;
+        
+        // Update last seen data
+        lastSeenUpdates[chat.id] = {
+          hash: currentHash,
+          timestamp: chat.updatedAt || 0
+        };
         
         // Update metadata
         await updateChatMetadata(chat.id, true);
@@ -904,9 +919,12 @@ async function syncFromCloud() {
               
               // Update metadata and last seen updates
               await updateChatMetadata(chatId, false);
-              if (cloudChat.updatedAt) {
-                lastSeenUpdates[chatId] = cloudChat.updatedAt;
-              }
+              // Update hash and timestamp in lastSeenUpdates
+              const cloudChatHash = await generateChatHash(cloudChat);
+              lastSeenUpdates[chatId] = {
+                hash: cloudChatHash,
+                timestamp: cloudChat.updatedAt || 0
+              };
             }
           } catch (error) {
             logToConsole("error", `Error processing download for chat ${chatId}`, error);
