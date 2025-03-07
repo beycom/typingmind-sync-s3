@@ -1075,7 +1075,6 @@ async function syncFromCloud() {
   }
   
   operationState.isImporting = true;
-  operationState.isImporting = true;
   
   try {
     logToConsole("start", "Starting sync from cloud");
@@ -1152,10 +1151,14 @@ async function syncFromCloud() {
        // Check if this chat has a tombstone in cloud metadata (deleted from another device)
        if (cloudChatMeta.deleted === true) {
          if (chatExistsLocally) {
-           // If chat still exists locally, mark it for deletion
+           // If chat still exists locally, delete it immediately instead of just marking it
+           logToConsole("cleanup", `Chat ${chatId} has a cloud tombstone entry - deleting it locally immediately`);
+           await deleteLocalChat(chatId);
+         } else {
+           // Also add to delete array as a backup in case the immediate deletion fails
            chatChanges.toDelete.push(chatId);
-           logToConsole("cleanup", `Chat ${chatId} has a cloud tombstone entry - marking for deletion locally`);
          }
+         
          // Keep the tombstone in sync
          if (!localChatMeta || localChatMeta.deleted !== true) {
            localMetadata.chats[chatId] = {
@@ -1332,8 +1335,15 @@ async function syncFromCloud() {
                 await deleteChatFromCloud(chatId);
                 logToConsole("success", `Deleted chat ${chatId} from cloud based on local tombstone entry`);
               } else {
-                // Chat already has a cloud tombstone or doesn't exist in cloud, so no need to try deletion again
-                logToConsole("info", `Chat ${chatId} has either already been deleted from cloud or has a cloud tombstone. Skipping deletion.`);
+                // Chat already has a cloud tombstone or doesn't exist in cloud, so no need to try cloud deletion again
+                logToConsole("info", `Chat ${chatId} has either already been deleted from cloud or has a cloud tombstone. Skipping cloud deletion.`);
+                
+                // But we still need to check if it exists locally and delete it if needed
+                if (chatExistsLocally) {
+                  logToConsole("cleanup", `Local copy of chat ${chatId} still exists despite cloud tombstone. Deleting it locally.`);
+                  await deleteLocalChat(chatId);
+                }
+                
                 // Update the syncedAt timestamp to prevent it from being processed again
                 if (localMetadata.chats[chatId]) {
                   localMetadata.chats[chatId].syncedAt = Date.now();
