@@ -456,7 +456,7 @@ function getS3Client() {
 
 // Download metadata from cloud
 async function downloadCloudMetadata() {
-  logToConsole("download", "Downloading metadata.json from cloud");
+  // logToConsole("download", "Downloading metadata.json from cloud");
   
   try {
     const { s3, bucketName } = getS3Client();
@@ -930,7 +930,7 @@ async function syncFromCloud() {
     // Update sync status
     localStorage.setItem("last-cloud-sync", new Date().toLocaleString());
     
-    logToConsole("success", "Sync completed successfully");
+    // logToConsole("success", "Sync completed successfully");
     operationState.lastSyncStatus = "success";
   } catch (error) {
     logToConsole("error", "Sync failed", error);
@@ -1146,7 +1146,7 @@ async function processOperationQueue() {
       // Add a small delay to ensure proper completion
       await new Promise(resolve => setTimeout(resolve, 500));
       
-      logToConsole("success", `Completed operation: ${nextOperation.name}`);
+      // logToConsole("success", `Completed operation: ${nextOperation.name}`);
       operationState.operationQueue.shift();
     } catch (error) {
       logToConsole("error", `Error executing operation ${nextOperation.name}:`, error);
@@ -1158,7 +1158,7 @@ async function processOperationQueue() {
   }
   
   operationState.isProcessingQueue = false;
-  logToConsole("info", "Operation queue processing completed");
+  // logToConsole("info", "Operation queue processing completed");
 }
 
 // ==================== ENCRYPTION/DECRYPTION ====================
