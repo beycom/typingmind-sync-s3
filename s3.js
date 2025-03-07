@@ -72,7 +72,7 @@ function logToConsole(type, message, data = null) {
   };
   
   const icon = icons[type] || "ℹ️";
-  if (type === "info") {return}
+  if (icon === "ℹ️") {return}
   const logMessage = `${icon}  ${timestamp} [Chat Sync v${EXTENSION_VERSION}] ${message}`;
   
   switch (type) {
@@ -347,10 +347,10 @@ function startPeriodicChangeCheck() {
     clearInterval(window.changeCheckInterval);
   }
   
-  // Set interval for checking changes (every 5 seconds)
-  window.changeCheckInterval = setInterval(checkForChanges, 5000);
+  // Set interval for checking changes (every 15 seconds)
+  window.changeCheckInterval = setInterval(checkForChanges, 15000);
   
-  logToConsole("info", "Started periodic change detection (checking every 5 seconds)");
+  logToConsole("info", "Started periodic change detection (checking every 15 seconds)");
 }
 
 // Check for changes in chats by comparing updatedAt timestamps
