@@ -1,10 +1,10 @@
 // Chat Sync Extension v1.0.1
-// Simplified to use IndexedDB's updatedAt property instead of mutation observers
+// A complete rewrite using IndexedDB's updatedAt property for change detection
+
+// ==================== CONSTANTS & STATE ====================
 
 const EXTENSION_VERSION = '1.0.1';
 let isConsoleLoggingEnabled = new URLSearchParams(window.location.search).get("log") === "true";
-
-// ==================== CORE DATA STRUCTURES ====================
 
 // Local metadata tracking
 let localMetadata = {
@@ -37,6 +37,66 @@ let syncConfig = {
 
 // Track last seen updated times
 let lastSeenUpdates = {};
+
+// ==================== LOGGING & UTILITIES ====================
+
+// Log to console with type and timestamp
+function logToConsole(type, message, data = null) {
+  if (!isConsoleLoggingEnabled) return;
+  
+  const timestamp = new Date().toISOString();
+  const icons = {
+    info: "ℹ️",
+    success: "✅",
+    warning: "⚠️",
+    error: "❌",
+    start: "🔄",
+    end: "🏁",
+    upload: "⬆️",
+    download: "⬇️",
+    cleanup: "🧹",
+    snapshot: "📸",
+    encrypt: "🔐",
+    decrypt: "🔓",
+    progress: "📊",
+    time: "⏰",
+    wait: "⏳",
+    pause: "⏸️",
+    resume: "▶️",
+    visibility: "👁️",
+    active: "📱",
+    calendar: "📅",
+    tag: "🏷️",
+    stop: "🛑",
+    skip: "⏩",
+  };
+  
+  const icon = icons[type] || "ℹ️";
+  const logMessage = `${icon} [Chat Sync v${EXTENSION_VERSION}] ${message}`;
+  
+  switch (type) {
+    case "error":
+      console.error(logMessage, data);
+      break;
+    case "warning":
+      console.warn(logMessage, data);
+      break;
+    default:
+      console.log(logMessage, data);
+  }
+}
+
+// Throttle function to limit how often a function can be called
+function throttle(func, limit) {
+  let lastCall = 0;
+  return function(...args) {
+    const now = Date.now();
+    if (now - lastCall >= limit) {
+      lastCall = now;
+      return func.apply(this, args);
+    }
+  };
+}
 
 // ==================== INITIALIZATION ====================
 
@@ -89,6 +149,9 @@ async function initializeExtension() {
   
   // Initialize lastSeenUpdates from current chat states
   await initializeLastSeenUpdates();
+  
+  // Setup localStorage change listener
+  setupLocalStorageChangeListener();
   
   // Check if we should perform initial sync
   if (syncConfig.syncMode === 'sync') {
@@ -156,7 +219,7 @@ async function loadLocalMetadata() {
       localMetadata = JSON.parse(storedMetadata);
       logToConsole("info", "Loaded local metadata", { 
         chatCount: Object.keys(localMetadata.chats).length,
-        lastSyncTime: new Date(localMetadata.lastSyncTime).toLocaleString()
+        lastSyncTime: localMetadata.lastSyncTime ? new Date(localMetadata.lastSyncTime).toLocaleString() : 'Never'
       });
     } else {
       // Initialize metadata from existing data
@@ -1147,11 +1210,27 @@ async function encryptData(data) {
 // Decrypt data
 async function decryptData(data) {
   const marker = "ENCRYPTED:";
+  
+  // Check if the data is a proper Uint8Array with enough length
+  if (!data || data.length < marker.length) {
+    logToConsole("error", "Invalid data format for decryption");
+    return {};
+  }
+  
   const dataString = new TextDecoder().decode(data.slice(0, marker.length));
   
   if (dataString !== marker) {
     logToConsole("info", "Data is not encrypted, returning as-is");
-    return JSON.parse(new TextDecoder().decode(data));
+    try {
+      // Try to parse as JSON
+      const textData = new TextDecoder().decode(data);
+      return JSON.parse(textData);
+    } catch (parseError) {
+      logToConsole("error", "JSON parse error on non-encrypted data:", parseError);
+      logToConsole("info", "Raw data (first 100 chars):", new TextDecoder().decode(data).substring(0, 100));
+      // Return empty object as fallback
+      return {};
+    }
   }
   
   const encryptionKey = localStorage.getItem("encryption-key");
@@ -1309,6 +1388,336 @@ function updateSyncStatusUI() {
   } else {
     messageElement.textContent = "Ready";
   }
+}
+
+// Insert sync button
+function insertSyncButton() {
+  // Create button element if it doesn't exist
+  if (document.querySelector('[data-element-id="cloud-sync-button"]')) return;
+  
+  const cloudSyncBtn = document.createElement("button");
+  cloudSyncBtn.setAttribute("data-element-id", "cloud-sync-button");
+  cloudSyncBtn.className =
+    "cursor-default group flex items-center justify-center p-1 text-sm font-medium flex-col group focus:outline-0 focus:text-white text-white/70";
+  
+  const cloudIconSVG = `
+    <svg class="w-6 h-6 flex-shrink-0" width="24px" height="24px" fill="none" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M19 9.76c-.12-3.13-2.68-5.64-5.83-5.64-2.59 0-4.77 1.68-5.53 4.01-.19-.03-.39-.04-.57-.04-2.45 0-4.44 1.99-4.44 4.44 0 2.45 1.99 4.44 4.44 4.44h11.93c2.03 0 3.67-1.64 3.67-3.67 0-1.95-1.52-3.55-3.44-3.65zm-5.83-3.64c2.15 0 3.93 1.6 4.21 3.68l.12.88.88.08c1.12.11 1.99 1.05 1.99 2.19 0 1.21-.99 2.2-2.2 2.2H7.07c-1.64 0-2.97-1.33-2.97-2.97 0-1.64 1.33-2.97 2.97-2.97.36 0 .72.07 1.05.2l.8.32.33-.8c.59-1.39 1.95-2.28 3.45-2.28z" fill="currentColor"></path>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M12 15.33v-5.33M9.67 12.33L12 14.67l2.33-2.34" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+  `;
+  
+  const textSpan = document.createElement("span");
+  textSpan.className = "font-normal self-stretch text-center text-xs leading-4 md:leading-none";
+  textSpan.innerText = "Sync";
+  
+  const iconSpan = document.createElement("span");
+  iconSpan.className = "block group-hover:bg-white/30 w-[35px] h-[35px] transition-all rounded-lg flex items-center justify-center group-hover:text-white/90";
+  iconSpan.innerHTML = cloudIconSVG;
+  
+  cloudSyncBtn.appendChild(iconSpan);
+  cloudSyncBtn.appendChild(textSpan);
+  
+  // Insert button into DOM (look for 'teams' button and insert after it)
+  function insertButton() {
+    const teamsButton = document.querySelector('[data-element-id="workspace-tab-teams"]');
+    if (teamsButton && teamsButton.parentNode) {
+      teamsButton.parentNode.insertBefore(cloudSyncBtn, teamsButton.nextSibling);
+      return true;
+    }
+    return false;
+  }
+  
+  // Try to insert button immediately
+  if (insertButton()) {
+    logToConsole("info", "Sync button inserted into DOM");
+  } else {
+    // If not possible yet, observe DOM changes
+    const observer = new MutationObserver((mutations) => {
+      if (insertButton()) {
+        observer.disconnect();
+        logToConsole("info", "Sync button inserted into DOM (via observer)");
+      }
+    });
+    
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+    
+    // Also try periodically
+    let attempts = 0;
+    const maxAttempts = 10;
+    const interval = setInterval(() => {
+      if (insertButton() || attempts >= maxAttempts) {
+        clearInterval(interval);
+      }
+      attempts++;
+    }, 1000);
+  }
+  
+  // Add click handler to open settings modal
+  cloudSyncBtn.addEventListener("click", openSyncModal);
+}
+
+// Create and open sync settings modal (basic implementation)
+function openSyncModal() {
+  // Don't create multiple instances
+  if (document.querySelector('[data-element-id="sync-modal"]')) return;
+  
+  // Create modal element
+  const modalElement = document.createElement("div");
+  modalElement.setAttribute("data-element-id", "sync-modal");
+  modalElement.className = "fixed inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-center z-[60] p-4 overflow-y-auto";
+  
+  modalElement.innerHTML = `
+    <div class="inline-block w-full align-bottom bg-white dark:bg-zinc-950 rounded-lg text-left shadow-xl transform transition-all sm:my-8 sm:p-6 sm:align-middle pt-4 overflow-hidden sm:max-w-lg">
+      <div class="text-gray-800 dark:text-white text-left text-sm">
+        <div class="flex justify-center items-center mb-3">
+          <h3 class="text-center text-xl font-bold">Cloud Sync Settings</h3>
+          <button class="ml-2 text-blue-600 text-lg" aria-label="Information">ⓘ</button>
+        </div>
+        
+        <div class="space-y-3">
+          <!-- Sync Mode -->
+          <div class="flex items-center space-x-4 mb-4 bg-gray-100 dark:bg-zinc-800 p-3 rounded-lg">
+            <label class="text-sm font-medium text-gray-700 dark:text-gray-400">Mode:</label>
+            <label class="inline-flex items-center">
+              <input type="radio" name="sync-mode" value="sync" class="form-radio text-blue-600">
+              <span class="ml-2">Sync</span>
+            </label>
+            <label class="inline-flex items-center">
+              <input type="radio" name="sync-mode" value="backup" class="form-radio text-blue-600">
+              <span class="ml-2">Backup</span>
+            </label>
+          </div>
+          
+          <!-- AWS Credentials -->
+          <div class="bg-gray-100 dark:bg-zinc-800 p-3 rounded-lg space-y-3">
+            <div class="flex space-x-4">
+              <div class="w-2/3">
+                <label for="aws-bucket" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Bucket Name <span class="text-red-500">*</span></label>
+                <input id="aws-bucket" name="aws-bucket" type="text" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
+              </div>
+              <div class="w-1/3">
+                <label for="aws-region" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Region <span class="text-red-500">*</span></label>
+                <input id="aws-region" name="aws-region" type="text" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
+              </div>
+            </div>
+            <div>
+              <label for="aws-access-key" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Access Key <span class="text-red-500">*</span></label>
+              <input id="aws-access-key" name="aws-access-key" type="password" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
+            </div>
+            <div>
+              <label for="aws-secret-key" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Secret Key <span class="text-red-500">*</span></label>
+              <input id="aws-secret-key" name="aws-secret-key" type="password" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
+            </div>
+            <div>
+              <label for="aws-endpoint" class="block text-sm font-medium text-gray-700 dark:text-gray-400">
+                S3 Compatible Storage Endpoint
+              </label>
+              <input id="aws-endpoint" name="aws-endpoint" type="text" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off">
+            </div>
+            <div class="flex space-x-4">
+              <div class="w-1/2">
+                <label for="backup-interval" class="block text-sm font-medium text-gray-700 dark:text-gray-400">Sync Interval (sec)</label>
+                <input id="backup-interval" name="backup-interval" type="number" min="15" placeholder="Default: 60" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
+              </div>
+              <div class="w-1/2">
+                <label for="encryption-key" class="block text-sm font-medium text-gray-700 dark:text-gray-400">
+                  Encryption Key <span class="text-red-500">*</span>
+                </label>
+                <input id="encryption-key" name="encryption-key" type="password" class="w-full px-2 py-1.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700" autocomplete="off" required>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Console logging -->
+          <div class="flex items-center justify-end mb-4 space-x-2">
+            <span class="text-sm text-gray-600 dark:text-gray-400">
+              Console Logging
+            </span>
+            <input type="checkbox" id="console-logging-toggle" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded cursor-pointer">
+          </div>
+          
+          <!-- Action buttons -->
+          <div class="flex justify-between space-x-2 mt-4">
+            <div>
+              <button id="save-settings-btn" type="button" class="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:bg-gray-400 disabled:cursor-default">
+                Save Settings
+              </button>
+            </div>
+            <div class="flex space-x-2">
+              <button id="sync-now-btn" type="button" class="inline-flex items-center px-2 py-1 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-gray-400 disabled:cursor-default">
+                <span>Sync Now</span>
+              </button>
+              <button id="close-modal-btn" type="button" class="inline-flex items-center px-2 py-1 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
+                <span>Close</span>
+              </button>
+            </div>
+          </div>
+          
+          <!-- Status message -->
+          <div class="text-center mt-4">
+            <span id="last-sync-msg"></span>
+          </div>
+          <div id="action-msg" class="text-center"></div>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  document.body.appendChild(modalElement);
+  
+  // Load existing values
+  loadExistingModalValues();
+  
+  // Add event listeners
+  document.getElementById("save-settings-btn").addEventListener("click", saveSettingsFromModal);
+  document.getElementById("sync-now-btn").addEventListener("click", syncNowFromModal);
+  document.getElementById("close-modal-btn").addEventListener("click", closeModal);
+  document.getElementById("console-logging-toggle").addEventListener("change", toggleConsoleLogging);
+  
+  // Close on outside click
+  modalElement.addEventListener("click", (e) => {
+    if (e.target === modalElement) {
+      closeModal();
+    }
+  });
+}
+
+// Load existing values into modal
+function loadExistingModalValues() {
+  // AWS credentials
+  document.getElementById("aws-bucket").value = localStorage.getItem("aws-bucket") || "";
+  document.getElementById("aws-region").value = localStorage.getItem("aws-region") || "";
+  document.getElementById("aws-access-key").value = localStorage.getItem("aws-access-key") || "";
+  document.getElementById("aws-secret-key").value = localStorage.getItem("aws-secret-key") || "";
+  document.getElementById("aws-endpoint").value = localStorage.getItem("aws-endpoint") || "";
+  
+  // Sync settings
+  document.getElementById("backup-interval").value = localStorage.getItem("backup-interval") || "60";
+  document.getElementById("encryption-key").value = localStorage.getItem("encryption-key") || "";
+  
+  // Sync mode
+  const syncMode = localStorage.getItem("sync-mode") || "sync";
+  document.querySelector(`input[name="sync-mode"][value="${syncMode}"]`).checked = true;
+  
+  // Console logging
+  document.getElementById("console-logging-toggle").checked = isConsoleLoggingEnabled;
+  
+  // Last sync message
+  const lastSync = localStorage.getItem("last-cloud-sync");
+  if (lastSync) {
+    document.getElementById("last-sync-msg").textContent = `Last sync done at ${lastSync}`;
+  }
+}
+
+// Save settings from modal
+function saveSettingsFromModal() {
+  const bucketName = document.getElementById("aws-bucket").value.trim();
+  const region = document.getElementById("aws-region").value.trim();
+  const accessKey = document.getElementById("aws-access-key").value.trim();
+  const secretKey = document.getElementById("aws-secret-key").value.trim();
+  const endpoint = document.getElementById("aws-endpoint").value.trim();
+  const backupInterval = document.getElementById("backup-interval").value;
+  const encryptionKey = document.getElementById("encryption-key").value.trim();
+  const selectedMode = document.querySelector('input[name="sync-mode"]:checked').value;
+  
+  // Validate settings
+  if (!bucketName || !region || !accessKey || !secretKey || !encryptionKey) {
+    showModalMessage("Please fill in all required fields", "error");
+    return;
+  }
+  
+  if (parseInt(backupInterval) < 15) {
+    showModalMessage("Sync interval must be at least 15 seconds", "error");
+    return;
+  }
+  
+  if (encryptionKey.length < 8) {
+    showModalMessage("Encryption key must be at least 8 characters long", "error");
+    return;
+  }
+  
+  // Save settings to localStorage
+  localStorage.setItem("aws-bucket", bucketName);
+  localStorage.setItem("aws-region", region);
+  localStorage.setItem("aws-access-key", accessKey);
+  localStorage.setItem("aws-secret-key", secretKey);
+  localStorage.setItem("aws-endpoint", endpoint);
+  localStorage.setItem("backup-interval", backupInterval);
+  localStorage.setItem("encryption-key", encryptionKey);
+  localStorage.setItem("sync-mode", selectedMode);
+  
+  // Update sync config
+  syncConfig.syncMode = selectedMode;
+  syncConfig.syncInterval = parseInt(backupInterval);
+  
+  // Restart sync interval
+  startSyncInterval();
+  
+  // Show success message
+  showModalMessage("Settings saved successfully", "success");
+  
+  // If in sync mode, trigger a sync
+  if (selectedMode === "sync") {
+    queueOperation("settings-save-sync", syncFromCloud);
+  }
+}
+
+// Sync now from modal
+function syncNowFromModal() {
+  queueOperation("manual-sync", syncFromCloud);
+  showModalMessage("Sync started", "info");
+}
+
+// Close modal
+function closeModal() {
+  document.querySelector('[data-element-id="sync-modal"]')?.remove();
+}
+
+// Toggle console logging
+function toggleConsoleLogging(e) {
+  isConsoleLoggingEnabled = e.target.checked;
+  
+  if (isConsoleLoggingEnabled) {
+    logToConsole("info", `Chat Sync Extension v${EXTENSION_VERSION}`);
+    const url = new URL(window.location);
+    url.searchParams.set("log", "true");
+    window.history.replaceState({}, "", url);
+  } else {
+    const url = new URL(window.location);
+    url.searchParams.delete("log");
+    window.history.replaceState({}, "", url);
+  }
+}
+
+// Show message in modal
+function showModalMessage(message, type = "info") {
+  const msgElement = document.getElementById("action-msg");
+  if (!msgElement) return;
+  
+  msgElement.textContent = message;
+  
+  // Set color based on type
+  switch (type) {
+    case "error":
+      msgElement.style.color = "#EF4444";
+      break;
+    case "success":
+      msgElement.style.color = "#10B981";
+      break;
+    default:
+      msgElement.style.color = "white";
+  }
+  
+  // Clear after 3 seconds
+  setTimeout(() => {
+    if (msgElement.textContent === message) {
+      msgElement.textContent = "";
+    }
+  }, 3000);
 }
 
 // Initialize the extension when the DOM is ready
