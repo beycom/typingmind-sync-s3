@@ -172,7 +172,7 @@ async function initializeExtension() {
     queueOperation('initial-sync', syncFromCloud);
   }
   
-  // Start periodic check for changes 
+  // Start periodic check for changes
   startPeriodicChangeCheck();
   
   // Set up visibility change handler
@@ -180,6 +180,9 @@ async function initializeExtension() {
   
   // Start regular sync interval
   startSyncInterval();
+  
+  // Start monitoring IndexedDB for deletions
+  monitorIndexedDBForDeletions();
   
   logToConsole("success", "Chat Sync Extension initialized");
 }
@@ -1179,11 +1182,22 @@ async function syncFromCloud() {
             // Check if this is a local or cloud deletion, or a tombstone entry
             const chatExistsLocally = currentLocalChatIds.has(chatId);
             const hasTombstone = localMetadata.chats[chatId] && localMetadata.chats[chatId].deleted === true;
+            const chatExistsInCloud = cloudMetadata.chats && chatId in cloudMetadata.chats;
             
             if (hasTombstone) {
               // This is a tombstone entry, we should delete it from cloud if it exists there
-              await deleteChatFromCloud(chatId);
-              logToConsole("success", `Deleted chat ${chatId} from cloud based on local tombstone entry`);
+              if (chatExistsInCloud && !cloudMetadata.chats[chatId].deleted) {
+                await deleteChatFromCloud(chatId);
+                logToConsole("success", `Deleted chat ${chatId} from cloud based on local tombstone entry`);
+              } else {
+                // Chat already has a cloud tombstone or doesn't exist in cloud, so no need to try deletion again
+                logToConsole("info", `Chat ${chatId} has either already been deleted from cloud or has a cloud tombstone. Skipping deletion.`);
+                // Update the syncedAt timestamp to prevent it from being processed again
+                if (localMetadata.chats[chatId]) {
+                  localMetadata.chats[chatId].syncedAt = Date.now();
+                  saveLocalMetadata();
+                }
+              }
               // Keep the tombstone entry in metadata to prevent future re-downloads
             } else if (!chatExistsLocally) {
               // Chat was deleted locally but no tombstone yet, remove it from the cloud
@@ -1921,6 +1935,61 @@ function showModalMessage(message, type = "info") {
       msgElement.textContent = "";
     }
   }, 3000);
+}
+
+// Monitor IndexedDB for chat deletions
+function monitorIndexedDBForDeletions() {
+  logToConsole("info", "Setting up IndexedDB deletion monitor");
+  
+  // Keep track of current chats
+  let knownChatIds = new Set();
+  
+  // Initial population of known chats
+  getAllChatsFromIndexedDB().then(chats => {
+    knownChatIds = new Set(chats.map(chat => chat.id));
+    logToConsole("info", `Initialized deletion monitor with ${knownChatIds.size} chats`);
+  });
+  
+  // Periodically check for deleted chats
+  setInterval(async () => {
+    if (document.hidden) return; // Skip if tab is not visible
+    
+    try {
+      // Get current chats
+      const currentChats = await getAllChatsFromIndexedDB();
+      const currentChatIds = new Set(currentChats.map(chat => chat.id));
+      
+      // Find deleted chats (chats that were in knownChatIds but not in currentChatIds)
+      const deletedChatIds = Array.from(knownChatIds).filter(id => !currentChatIds.has(id));
+      
+      // Process deleted chats
+      for (const chatId of deletedChatIds) {
+        // Skip if already has a tombstone
+        if (localMetadata.chats[chatId] && localMetadata.chats[chatId].deleted === true) {
+          continue;
+        }
+        
+        logToConsole("cleanup", `Detected local deletion of chat ${chatId}, creating tombstone`);
+        
+        // Create tombstone entry
+        localMetadata.chats[chatId] = {
+          deleted: true,
+          deletedAt: Date.now(),
+          lastModified: Date.now(),
+          syncedAt: 0 // Set to 0 to ensure it's synced to cloud
+        };
+        saveLocalMetadata();
+        
+        // Queue deletion from cloud
+        queueOperation(`delete-chat-${chatId}`, () => deleteChatFromCloud(chatId));
+      }
+      
+      // Update known chat IDs
+      knownChatIds = currentChatIds;
+    } catch (error) {
+      logToConsole("error", "Error in deletion monitor", error);
+    }
+  }, 10000); // Check every 10 seconds
 }
 
 // Initialize the extension when the DOM is ready
