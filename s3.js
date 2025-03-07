@@ -718,34 +718,93 @@ async function deleteLocalChat(chatId) {
   logToConsole("cleanup", `Deleting chat ${chatId} locally`);
   
   try {
+    // First check if the chat actually exists
+    const chat = await getChatFromIndexedDB(chatId);
+    if (!chat) {
+      logToConsole("info", `Chat ${chatId} does not exist locally, only creating tombstone`);
+      // Still create a tombstone entry to prevent future sync issues
+      if (localMetadata.chats) {
+        localMetadata.chats[chatId] = {
+          deleted: true,
+          deletedAt: Date.now(),
+          lastModified: Date.now(),
+          syncedAt: 0
+        };
+        saveLocalMetadata();
+        logToConsole("info", `Created tombstone entry for chat ${chatId} in local metadata`);
+      }
+      
+      // Also remove from lastSeenUpdates
+      if (lastSeenUpdates[chatId]) {
+        delete lastSeenUpdates[chatId];
+      }
+      
+      return true;
+    }
+    
+    // Chat exists, proceed with deletion
     const key = chatId.startsWith('CHAT_') ? chatId : `CHAT_${chatId}`;
-    const request = indexedDB.open("keyval-store", 1);
     
-    const db = await new Promise((resolve, reject) => {
-      request.onerror = () => reject(request.error);
-      request.onsuccess = (event) => resolve(event.target.result);
-      request.onupgradeneeded = (event) => {
-        const db = event.target.result;
-        if (!db.objectStoreNames.contains('keyval')) {
-          db.createObjectStore('keyval');
+    // Use a more robust approach to delete from IndexedDB
+    try {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open("keyval-store", 1);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = (event) => resolve(event.target.result);
+        request.onupgradeneeded = (event) => {
+          const db = event.target.result;
+          if (!db.objectStoreNames.contains('keyval')) {
+            db.createObjectStore('keyval');
+          }
+        };
+      });
+      
+      // First, verify the chat exists in the database
+      const getTransaction = db.transaction(["keyval"], "readonly");
+      const getStore = getTransaction.objectStore("keyval");
+      const getResult = await new Promise((resolve) => {
+        const request = getStore.get(key);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => resolve(null);
+      });
+      
+      if (!getResult) {
+        logToConsole("info", `Chat ${chatId} not found in IndexedDB, only creating tombstone`);
+      } else {
+        // Proceed with deletion
+        const deleteTransaction = db.transaction(["keyval"], "readwrite");
+        const deleteStore = deleteTransaction.objectStore("keyval");
+        
+        await new Promise((resolve, reject) => {
+          const deleteRequest = deleteStore.delete(key);
+          deleteRequest.onsuccess = () => {
+            logToConsole("success", `Deleted chat ${chatId} from local IndexedDB`);
+            resolve();
+          };
+          deleteRequest.onerror = () => {
+            reject(deleteRequest.error);
+          };
+        });
+        
+        // Verify deletion was successful
+        const verifyTransaction = db.transaction(["keyval"], "readonly");
+        const verifyStore = verifyTransaction.objectStore("keyval");
+        const verifyResult = await new Promise((resolve) => {
+          const request = verifyStore.get(key);
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => resolve(null);
+        });
+        
+        if (verifyResult) {
+          logToConsole("warning", `Chat ${chatId} still exists after deletion attempt, will retry later`);
+        } else {
+          logToConsole("success", `Verified chat ${chatId} was properly deleted from IndexedDB`);
         }
-      };
-    });
-    
-    await new Promise((resolve, reject) => {
-      const transaction = db.transaction(["keyval"], "readwrite");
-      const store = transaction.objectStore("keyval");
-      const deleteRequest = store.delete(key);
-      
-      deleteRequest.onsuccess = () => {
-        logToConsole("success", `Deleted chat ${chatId} from local IndexedDB`);
-        resolve();
-      };
-      
-      deleteRequest.onerror = () => {
-        reject(deleteRequest.error);
-      };
-    });
+      }
+    } catch (dbError) {
+      logToConsole("error", `IndexedDB error while deleting chat ${chatId}`, dbError);
+      // Continue with tombstone creation despite error
+    }
     
     // Create a "tombstone" entry in metadata to mark this chat as deleted
     // This prevents the chat from being re-downloaded if it exists in the cloud
@@ -765,10 +824,43 @@ async function deleteLocalChat(chatId) {
       delete lastSeenUpdates[chatId];
     }
     
+    // Force UI refresh if the chat list component is accessible
+    try {
+      // Find any chat list component and force a refresh
+      const chatListComponent = Array.from(document.querySelectorAll('[class*="sidebar"]')).find(el => el.innerText.includes('New Chat'));
+      if (chatListComponent) {
+        // Trigger a click on the active element to force a refresh
+        const activeElement = chatListComponent.querySelector('[aria-current="true"]');
+        if (activeElement) {
+          activeElement.click();
+          setTimeout(() => {
+            logToConsole("info", "Triggered chat list UI refresh");
+          }, 100);
+        }
+      }
+    } catch (uiError) {
+      // Ignore UI refresh errors
+    }
+    
     return true;
   } catch (error) {
     logToConsole("error", `Error deleting chat ${chatId} locally`, error);
-    throw error;
+    // Create tombstone entry even if deletion fails
+    try {
+      if (localMetadata.chats) {
+        localMetadata.chats[chatId] = {
+          deleted: true,
+          deletedAt: Date.now(),
+          lastModified: Date.now(),
+          syncedAt: 0
+        };
+        saveLocalMetadata();
+        logToConsole("info", `Created tombstone entry for chat ${chatId} despite deletion error`);
+      }
+    } catch (metadataError) {
+      logToConsole("error", `Error creating tombstone for chat ${chatId}`, metadataError);
+    }
+    return false;
   }
 }
 
@@ -924,6 +1016,55 @@ function setupVisibilityChangeHandler() {
   
   // No need to log setup processes
 }
+// Clean up old tombstones
+function cleanupOldTombstones() {
+  const now = Date.now();
+  const tombstoneRetentionPeriod = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
+  let cleanupCount = 0;
+  
+  // Check local metadata for old tombstones
+  for (const [chatId, metadata] of Object.entries(localMetadata.chats)) {
+    if (metadata.deleted && metadata.deletedAt && (now - metadata.deletedAt > tombstoneRetentionPeriod)) {
+      delete localMetadata.chats[chatId];
+      cleanupCount++;
+    }
+  }
+  
+  if (cleanupCount > 0) {
+    saveLocalMetadata();
+    logToConsole("cleanup", `Removed ${cleanupCount} old tombstone entries`);
+  }
+  
+  return cleanupCount;
+}
+
+// Clean up cloud tombstones
+async function cleanupCloudTombstones() {
+  try {
+    const cloudMetadata = await downloadCloudMetadata();
+    const now = Date.now();
+    const tombstoneRetentionPeriod = 30 * 24 * 60 * 60 * 1000; // 30 days
+    let cleanupCount = 0;
+    
+    if (cloudMetadata.chats) {
+      for (const [chatId, metadata] of Object.entries(cloudMetadata.chats)) {
+        if (metadata.deleted && metadata.deletedAt && (now - metadata.deletedAt > tombstoneRetentionPeriod)) {
+          delete cloudMetadata.chats[chatId];
+          cleanupCount++;
+        }
+      }
+      
+      if (cleanupCount > 0) {
+        await uploadCloudMetadata(cloudMetadata);
+        logToConsole("cleanup", `Removed ${cleanupCount} old tombstone entries from cloud metadata`);
+      }
+    }
+    return cleanupCount;
+  } catch (error) {
+    logToConsole("error", "Error cleaning up cloud tombstones", error);
+    return 0;
+  }
+}
 
 // Main sync function
 async function syncFromCloud() {
@@ -933,6 +1074,7 @@ async function syncFromCloud() {
     return;
   }
   
+  operationState.isImporting = true;
   operationState.isImporting = true;
   
   try {
