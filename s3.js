@@ -44,35 +44,50 @@ let lastSeenUpdates = {};
 function logToConsole(type, message, data = null) {
   if (!isConsoleLoggingEnabled) return;
   
-  const timestamp = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});  const icons = {
+  // Define log priority levels
+  const priorityLevels = {
+    error: 1,      // Always log errors - highest priority
+    warning: 2,    // Important warnings
+    success: 2,    // Success messages for important operations
+    upload: 2,     // Important upload events
+    download: 2,   // Important download events
+    cleanup: 2,    // Deletion operations
+    start: 3,      // Start of key operations
+    end: 3,        // End of key operations
+    info: 4,       // General info
+    skip: 5,       // Low priority skips
+    visibility: 5, // Visibility events
+    active: 5      // Tab activity - lowest priority
+  };
+  
+  // Default to lowest priority (5) if type not defined
+  const priority = priorityLevels[type] || 5;
+  
+  // By default, only show priority 1-3 logs unless debug mode is enabled
+  if (!isConsoleLoggingEnabled && priority > 3) return;
+  
+  const timestamp = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
+  const icons = {
     info: "ℹ️",
     success: "✅",
-    warning: "⚠️⚠️⚠️",
+    warning: "⚠️",
     error: "❌",
     start: "🔄",
     end: "🏁",
-    upload: "!!!⬆️⬆️⬆️⬆️!!!",
-    download: "!!!⬇️⬇️⬇️⬇️!!!",
+    upload: "⬆️",
+    download: "⬇️",
     cleanup: "🧹",
     snapshot: "📸",
     encrypt: "🔐",
     decrypt: "🔓",
-    progress: "📊",
     time: "⏰",
-    wait: "⏳",
-    pause: "⏸️",
-    resume: "▶️",
-    visibility: "👁️",
-    active: "📱",
-    calendar: "📅",
-    tag: "🏷️",
-    stop: "🛑",
     skip: "⏩",
+    visibility: "👁️",
+    active: "📱"
   };
   
   const icon = icons[type] || "ℹ️";
-  if (icon === "ℹ️") {return}
-  const logMessage = `${icon}  ${timestamp} [Chat Sync v${EXTENSION_VERSION}] ${message}`;
+  const logMessage = `${icon} ${timestamp} [Chat Sync v${EXTENSION_VERSION}] ${message}`;
   
   switch (type) {
     case "error":
@@ -166,7 +181,7 @@ async function initializeExtension() {
   // Start regular sync interval
   startSyncInterval();
   
-  logToConsole("success", "Extension initialization complete");
+  logToConsole("success", "Chat Sync Extension initialized");
 }
 
 // Initialize tracking of last seen updates
@@ -182,9 +197,10 @@ async function initializeLastSeenUpdates() {
         };
       }
     }
-    logToConsole("info", "Initialized last seen updates", {
-      chatCount: Object.keys(lastSeenUpdates).length
-    });
+    // Don't log detailed initialization stats - only errors are important here
+    if (isConsoleLoggingEnabled) {
+      logToConsole("info", `Initialized tracking for ${Object.keys(lastSeenUpdates).length} chats`);
+    }
   } catch (error) {
     logToConsole("error", "Failed to initialize last seen updates", error);
   }
@@ -200,7 +216,10 @@ function loadConfiguration() {
   syncConfig.exportThreshold = parseFloat(localStorage.getItem("export-size-threshold") || "10");
   syncConfig.alertOnSmallerCloud = localStorage.getItem("alert-smaller-cloud") === "true";
   
-  logToConsole("info", "Configuration loaded", syncConfig);
+  // Only log configuration in debug mode
+  if (isConsoleLoggingEnabled) {
+    logToConsole("info", "Configuration loaded");
+  }
 }
 
 // Save configuration to localStorage
@@ -211,7 +230,10 @@ function saveConfiguration() {
   localStorage.setItem("export-size-threshold", syncConfig.exportThreshold.toString());
   localStorage.setItem("alert-smaller-cloud", syncConfig.alertOnSmallerCloud.toString());
   
-  logToConsole("info", "Configuration saved", syncConfig);
+  // Only log configuration in debug mode
+  if (isConsoleLoggingEnabled) {
+    logToConsole("info", "Configuration saved");
+  }
 }
 
 // Load metadata from localStorage
@@ -273,7 +295,7 @@ async function initializeMetadataFromExistingData() {
 // Save metadata to localStorage
 function saveLocalMetadata() {
   localStorage.setItem("chat-sync-metadata", JSON.stringify(localMetadata));
-  logToConsole("info", "Saved local metadata");
+  // No need to log every metadata save - very frequent operation
 }
 
 // Update metadata for a specific chat
@@ -304,11 +326,10 @@ async function updateChatMetadata(chatId, isLocalUpdate = true) {
     // Save updated metadata
     saveLocalMetadata();
     
-    logToConsole("info", `Updated metadata for chat ${chatId}`, {
-      lastModified: new Date(localMetadata.chats[chatId].lastModified).toLocaleString(),
-      syncedAt: localMetadata.chats[chatId].syncedAt ? new Date(localMetadata.chats[chatId].syncedAt).toLocaleString() : 'Never',
-      hash: newHash.substring(0, 8) + '...'
-    });
+    // Log chat metadata updates only in debug mode or reduce verbosity
+    if (isConsoleLoggingEnabled) {
+      logToConsole("info", `Updated metadata for chat ${chatId.substring(0, 8)}...`);
+    }
   } catch (error) {
     logToConsole("error", `Error updating metadata for chat ${chatId}`, error);
   }
@@ -345,7 +366,7 @@ async function generateChatHash(chat) {
 
 // Start periodic check for changes in IndexedDB
 function startPeriodicChangeCheck() {
-  logToConsole("warning", "STARTING CHANGE CHECK!!!!!");
+  logToConsole("info", "Starting periodic change detection");
   // Clear any existing interval
   if (window.changeCheckInterval) {
     clearInterval(window.changeCheckInterval);
@@ -354,7 +375,7 @@ function startPeriodicChangeCheck() {
   // Set interval for checking changes (every 5 seconds)
   window.changeCheckInterval = setInterval(checkForChanges, 2500);
   
-  logToConsole("info", "Started periodic change detection (checking every 5 seconds)");
+  // This log is redundant with the one above
 }
 
 // Check for changes in chats by comparing hash first, then timestamps
@@ -398,7 +419,7 @@ async function checkForChanges() {
         count: changedChats.length
       });
     }
-    else {logToConsole("warning", "No changes detected in chats");}
+    // No need to log when nothing changes - reduces noise
   } catch (error) {
     logToConsole("error", "Error checking for changes", error);
   }
@@ -426,7 +447,7 @@ function setupLocalStorageChangeListener() {
     }
   };
   
-  logToConsole("info", "localStorage change detection setup");
+  // No need to log this setup process
 }
 
 // Update settings metadata
@@ -472,7 +493,7 @@ function getS3Client() {
 
 // Download metadata from cloud
 async function downloadCloudMetadata() {
-  // logToConsole("download", "Downloading metadata.json from cloud");
+  // Metadata operations happen frequently and don't need to be logged
   
   try {
     const { s3, bucketName } = getS3Client();
@@ -511,7 +532,7 @@ async function downloadCloudMetadata() {
 
 // Upload metadata to cloud
 async function uploadCloudMetadata(metadata) {
-  // logToConsole("upload", "Uploading metadata.json to cloud");
+  // Metadata operations happen frequently and don't need to be logged
   
   try {
     const { s3, bucketName } = getS3Client();
@@ -533,7 +554,7 @@ async function uploadCloudMetadata(metadata) {
     
     await s3.putObject(params).promise();
     
-    // logToConsole("success", "Uploaded cloud metadata");
+    logToConsole("success", "Uploaded cloud metadata");
     
     // Update local metadata's last sync time
     localMetadata.lastSyncTime = metadata.lastSyncTime;
@@ -743,7 +764,7 @@ async function deleteLocalChat(chatId) {
 
 // Download settings from cloud
 async function downloadSettingsFromCloud() {
-  // logToConsole("download", "Downloading settings.json from cloud");
+  logToConsole("download", "Downloading settings.json from cloud");
   
   try {
     const { s3, bucketName } = getS3Client();
@@ -759,9 +780,9 @@ async function downloadSettingsFromCloud() {
       const encryptedContent = new Uint8Array(data.Body);
       const settingsData = await decryptData(encryptedContent);
       
-      // logToConsole("success", "Downloaded settings from cloud", {
-      //   settingsCount: Object.keys(settingsData).length
-      // });
+      logToConsole("success", "Downloaded settings from cloud", {
+        settingsCount: Object.keys(settingsData).length
+      });
       
       return settingsData;
     } catch (error) {
@@ -796,7 +817,7 @@ async function downloadSettingsFromCloud() {
 
 // Upload settings to cloud
 async function uploadSettingsToCloud() {
-  // logToConsole("upload", "Uploading settings.json to cloud");
+  logToConsole("upload", "Uploading settings.json to cloud");
   
   try {
     const { s3, bucketName } = getS3Client();
@@ -832,9 +853,9 @@ async function uploadSettingsToCloud() {
     
     await s3.putObject(params).promise();
     
-    // logToConsole("success", "Uploaded ALL localStorage settings to cloud", {
-    //   settingsCount: Object.keys(settingsData).length
-    // });
+    logToConsole("success", "Uploaded settings to cloud", {
+      settingsCount: Object.keys(settingsData).length
+    });
     
     // Update metadata
     localMetadata.settings.syncedAt = Date.now();
@@ -874,22 +895,24 @@ function startSyncInterval() {
     queueOperation('interval-sync', syncFromCloud);
   }, intervalMs);
   
-  // logToConsole("info", `Sync interval started (${syncConfig.syncInterval} seconds)`);
+  // No need to log sync interval start - happens automatically
 }
 
 // Handle visibility change
 function setupVisibilityChangeHandler() {
   document.addEventListener("visibilitychange", () => {
-    logToConsole("visibility", `Visibility changed: ${document.hidden ? "hidden" : "visible"}`);
+    // Only log when tab becomes visible (hidden state isn't as important)
+    if (!document.hidden) {
+      logToConsole("visibility", "Tab became visible");
+    }
     
     if (!document.hidden) {
-      // Tab became visible
-      logToConsole("active", "Tab became active, checking for updates");
+      // Tab became visible - queue sync
       queueOperation('visibility-sync', syncFromCloud);
     }
   });
   
-  logToConsole("info", "Visibility change handler set up");
+  // No need to log setup processes
 }
 
 // Main sync function
@@ -1032,12 +1055,14 @@ async function syncFromCloud() {
         }
       }
       
-      logToConsole("info", "Chat sync status", {
-        toDownload: chatChanges.toDownload.length,
-        toUpload: chatChanges.toUpload.length,
-        unchanged: chatChanges.unchanged.length,
-        toDelete: chatChanges.toDelete.length
-      });
+      // Only log sync status if there are changes to make
+      if (chatChanges.toDownload.length > 0 || chatChanges.toUpload.length > 0 || chatChanges.toDelete.length > 0) {
+        logToConsole("info", "Chat sync status", {
+          toDownload: chatChanges.toDownload.length,
+          toUpload: chatChanges.toUpload.length,
+          toDelete: chatChanges.toDelete.length
+        });
+      }
       
       // Process downloads
       if (chatChanges.toDownload.length > 0) {
@@ -1158,10 +1183,12 @@ async function syncFromCloud() {
     // Update sync status
     localStorage.setItem("last-cloud-sync", new Date().toLocaleString());
     
-    // logToConsole("success", "Sync completed successfully");
+    logToConsole("success", "Sync completed successfully");
     operationState.lastSyncStatus = "success";
   } catch (error) {
-    logToConsole("error", "Sync failed", error);
+    // Always log sync failures prominently
+    console.error("❌ SYNC ERROR:", error);
+    logToConsole("error", "Sync failed - check connection and S3 credentials");
     operationState.lastSyncStatus = "failed";
     throw error;
   } finally {
@@ -1348,7 +1375,10 @@ function queueOperation(name, operation) {
   }
   
   operationState.operationQueue.push({ name, operation });
-  logToConsole("info", `Added '${name}' to operation queue`);
+  // Only log important operations
+  if (name.startsWith('initial') || name.startsWith('manual') || name.startsWith('visibility')) {
+    logToConsole("info", `Added '${name}' to operation queue`);
+  }
   
   // Start processing if not already processing
   if (!operationState.isProcessingQueue) {
@@ -1363,18 +1393,24 @@ async function processOperationQueue() {
   }
   
   operationState.isProcessingQueue = true;
-  logToConsole("info", `Processing operation queue (${operationState.operationQueue.length} items)`);
+  // Only log queue processing for 2+ items to reduce noise
+  if (operationState.operationQueue.length > 1) {
+    logToConsole("info", `Processing operation queue (${operationState.operationQueue.length} items)`);
+  }
   
   while (operationState.operationQueue.length > 0) {
     const nextOperation = operationState.operationQueue[0];
     try {
-      logToConsole("info", `Executing operation: ${nextOperation.name}`);
+      // Only log important operations
+      if (nextOperation.name.startsWith('initial') || nextOperation.name.startsWith('manual') || nextOperation.name.startsWith('visibility')) {
+        logToConsole("info", `Executing operation: ${nextOperation.name}`);
+      }
       await nextOperation.operation();
       
       // Add a small delay to ensure proper completion
       await new Promise(resolve => setTimeout(resolve, 500));
       
-      // logToConsole("success", `Completed operation: ${nextOperation.name}`);
+      // No need to log each operation completion
       operationState.operationQueue.shift();
     } catch (error) {
       logToConsole("error", `Error executing operation ${nextOperation.name}:`, error);
@@ -1386,7 +1422,7 @@ async function processOperationQueue() {
   }
   
   operationState.isProcessingQueue = false;
-  // logToConsole("info", "Operation queue processing completed");
+  // No need to log queue processing completion
 }
 
 // ==================== ENCRYPTION/DECRYPTION ====================
