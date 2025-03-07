@@ -4,7 +4,33 @@
 // ==================== CONSTANTS & STATE ====================
 
 const EXTENSION_VERSION = '1.0.2';
+const MOBILE_DEBUG = true
 let isConsoleLoggingEnabled = new URLSearchParams(window.location.search).get("log") === "true";
+
+// Add this function to show errors visually on mobile
+function showMobileDebug(message, isError = false) {
+    if (!MOBILE_DEBUG) return;
+    // Create debug element if it doesn't exist
+    if (!document.getElementById('mobile-debug')) {
+      const debugEl = document.createElement('div');
+      debugEl.id = 'mobile-debug';
+      debugEl.style.cssText = 'position:fixed; bottom:10px; left:10px; right:10px; max-height:150px; overflow-y:auto; background:rgba(0,0,0,0.8); color:white; z-index:9999; padding:10px; border-radius:5px; font-size:12px;';
+      document.body.appendChild(debugEl);
+    }
+    
+    const debugEl = document.getElementById('mobile-debug');
+    const entry = document.createElement('div');
+    entry.style.cssText = isError ? 'color:#ff6b6b;margin-bottom:5px;' : 'margin-bottom:5px;';
+    entry.textContent = `${new Date().toLocaleTimeString()}: ${message}`;
+    debugEl.appendChild(entry);
+    
+    // Scroll to bottom
+    debugEl.scrollTop = debugEl.scrollHeight;
+  }
+  
+  // Add calls to this in key functions:
+  // In downloadCloudMetadata, syncFromCloud, etc.
+  
 
 // Local metadata tracking
 let localMetadata = {
@@ -72,17 +98,20 @@ function logToConsole(type, message, data = null) {
   };
   
   const icon = icons[type] || "ℹ️";
-  const logMessage = `${icon} [Chat Sync v${EXTENSION_VERSION}] ${message}`;
+  const logMessage = `${icon} ${timestamp} [Chat Sync v${EXTENSION_VERSION}] ${message}`;
   
   switch (type) {
     case "error":
       console.error(logMessage, data);
+      showMobileDebug(logMessage, true)
       break;
     case "warning":
       console.warn(logMessage, data);
+      showMobileDebug(logMessage)
       break;
     default:
       console.log(logMessage, data);
+      showMobileDebug(logMessage)
   }
 }
 
