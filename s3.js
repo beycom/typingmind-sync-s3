@@ -517,7 +517,7 @@ async function uploadCloudMetadata(metadata) {
     
     await s3.putObject(params).promise();
     
-    logToConsole("success", "Uploaded cloud metadata");
+    // logToConsole("success", "Uploaded cloud metadata");
     
     // Update local metadata's last sync time
     localMetadata.lastSyncTime = metadata.lastSyncTime;
@@ -624,7 +624,7 @@ async function uploadChatToCloud(chatId) {
 
 // Download settings from cloud
 async function downloadSettingsFromCloud() {
-  logToConsole("download", "Downloading settings.json from cloud");
+  // logToConsole("download", "Downloading settings.json from cloud");
   
   try {
     const { s3, bucketName } = getS3Client();
@@ -640,9 +640,9 @@ async function downloadSettingsFromCloud() {
       const encryptedContent = new Uint8Array(data.Body);
       const settingsData = await decryptData(encryptedContent);
       
-      logToConsole("success", "Downloaded settings from cloud", {
-        settingsCount: Object.keys(settingsData).length
-      });
+      // logToConsole("success", "Downloaded settings from cloud", {
+      //   settingsCount: Object.keys(settingsData).length
+      // });
       
       return settingsData;
     } catch (error) {
@@ -677,7 +677,7 @@ async function downloadSettingsFromCloud() {
 
 // Upload settings to cloud
 async function uploadSettingsToCloud() {
-  logToConsole("upload", "Uploading settings.json to cloud");
+  // logToConsole("upload", "Uploading settings.json to cloud");
   
   try {
     const { s3, bucketName } = getS3Client();
@@ -713,9 +713,9 @@ async function uploadSettingsToCloud() {
     
     await s3.putObject(params).promise();
     
-    logToConsole("success", "Uploaded ALL localStorage settings to cloud", {
-      settingsCount: Object.keys(settingsData).length
-    });
+    // logToConsole("success", "Uploaded ALL localStorage settings to cloud", {
+    //   settingsCount: Object.keys(settingsData).length
+    // });
     
     // Update metadata
     localMetadata.settings.syncedAt = Date.now();
@@ -755,7 +755,7 @@ function startSyncInterval() {
     queueOperation('interval-sync', syncFromCloud);
   }, intervalMs);
   
-  logToConsole("info", `Sync interval started (${syncConfig.syncInterval} seconds)`);
+  // logToConsole("info", `Sync interval started (${syncConfig.syncInterval} seconds)`);
 }
 
 // Handle visibility change
@@ -826,7 +826,7 @@ async function syncFromCloud() {
         localMetadata.settings.syncedAt = cloudMetadata.settings.lastModified;
         saveLocalMetadata();
         
-        logToConsole("success", "Applied ALL localStorage settings from cloud");
+        // logToConsole("success", "Applied ALL localStorage settings from cloud");
       }
     }
     
