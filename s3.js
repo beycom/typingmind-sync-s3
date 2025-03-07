@@ -72,6 +72,7 @@ function logToConsole(type, message, data = null) {
   };
   
   const icon = icons[type] || "ℹ️";
+  if (type === "info") {return}
   const logMessage = `${icon}  ${timestamp} [Chat Sync v${EXTENSION_VERSION}] ${message}`;
   
   switch (type) {
@@ -108,7 +109,7 @@ async function loadAwsSdk() {
       return;
     }
     const script = document.createElement("script");
-    script.src = "https://sdk.amazonaws.com/js/aws-sdk-2.804.0.min.js";
+    script.src = "https://sdk.amazonaws.com/js/aws-sdk-2.1692.0.min.js";
     script.onload = resolve;
     script.onerror = reject;
     document.head.appendChild(script);
@@ -842,8 +843,8 @@ async function syncFromCloud() {
         const localChatMeta = localMetadata.chats[chatId];
         
         if (!localChatMeta || 
-          cloudChatMeta.lastModified > localChatMeta.syncedAt ||
-          cloudChatMeta.hash !== localChatMeta.hash) {
+          cloudChatMeta.lastModified >= localChatMeta.syncedAt || 
+          (cloudChatMeta.hash && localChatMeta.hash && cloudChatMeta.hash !== localChatMeta.hash)) {
         // Cloud version is newer or different
         chatChanges.toDownload.push(chatId);
       } else if (localChatMeta.lastModified > localChatMeta.syncedAt) {
