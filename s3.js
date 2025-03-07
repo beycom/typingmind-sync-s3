@@ -51,8 +51,8 @@ function logToConsole(type, message, data = null) {
     error: "❌",
     start: "🔄",
     end: "🏁",
-    upload: "⬆️",
-    download: "⬇️",
+    upload: "!!!⬆️⬆️⬆️⬆️!!!",
+    download: "!!!⬇️⬇️⬇️⬇️!!!",
     cleanup: "🧹",
     snapshot: "📸",
     encrypt: "🔐",
@@ -341,6 +341,7 @@ async function generateChatHash(chat) {
 
 // Start periodic check for changes in IndexedDB
 function startPeriodicChangeCheck() {
+  logToConsole("warning", "STARTING CHANGE CHECK!!!!!");
   // Clear any existing interval
   if (window.changeCheckInterval) {
     clearInterval(window.changeCheckInterval);
