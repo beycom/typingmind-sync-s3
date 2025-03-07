@@ -4,16 +4,17 @@
 // ==================== CONSTANTS & STATE ====================
 
 const EXTENSION_VERSION = '1.0.2';
+const MOBILE_DEBUG = true
 let isConsoleLoggingEnabled = new URLSearchParams(window.location.search).get("log") === "true";
 
 // Add this function to show errors visually on mobile
 function showMobileDebug(message, isError = false) {
-    if (!isConsoleLoggingEnabled) return;
+    if (!MOBILE_DEBUG) return;
     // Create debug element if it doesn't exist
     if (!document.getElementById('mobile-debug')) {
       const debugEl = document.createElement('div');
       debugEl.id = 'mobile-debug';
-      debugEl.style.cssText = 'position:fixed; bottom:100px; left:10px; right:10px; max-height:250px; overflow-y:auto; background:rgba(0,0,0,0.8); color:white; z-index:9999; padding:10px; border-radius:5px; font-size:12px;';
+      debugEl.style.cssText = 'position:fixed; bottom:200px; left:10px; right:10px; max-height:500px; max-width:700px; overflow-y:auto; background:rgba(0,0,0,0.8); color:white; z-index:9999; padding:10px; border-radius:5px; font-size:12px;';
       document.body.appendChild(debugEl);
     }
     
@@ -54,7 +55,7 @@ let operationState = {
 // Configuration options with defaults
 let syncConfig = {
   syncMode: 'sync', // 'sync' or 'backup'
-  syncInterval: 60, // seconds
+  syncInterval: 30, // seconds
   importThreshold: 1, // percentage
   exportThreshold: 10, // percentage
   alertOnSmallerCloud: true
@@ -1109,7 +1110,7 @@ async function getChatFromIndexedDB(chatId) {
 // Save a chat to IndexedDB
 async function saveChatToIndexedDB(chat) {
   return new Promise((resolve, reject) => {
-    const key = chat.id;
+    const key = `CHAT_${chat.id}`;
     const request = indexedDB.open("keyval-store", 1);
     
     request.onerror = () => reject(request.error);
