@@ -347,10 +347,10 @@ function startPeriodicChangeCheck() {
     clearInterval(window.changeCheckInterval);
   }
   
-  // Set interval for checking changes (every 15 seconds)
+  // Set interval for checking changes (every 5 seconds)
   window.changeCheckInterval = setInterval(checkForChanges, 5000);
   
-  logToConsole("info", "Started periodic change detection (checking every 15 seconds)");
+  logToConsole("info", "Started periodic change detection (checking every 5 seconds)");
 }
 
 // Check for changes in chats by comparing updatedAt timestamps
