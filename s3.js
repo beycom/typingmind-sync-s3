@@ -44,8 +44,7 @@ let lastSeenUpdates = {};
 function logToConsole(type, message, data = null) {
   if (!isConsoleLoggingEnabled) return;
   
-  const timestamp = new Date().toISOString();
-  const icons = {
+  const timestamp = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});  const icons = {
     info: "ℹ️",
     success: "✅",
     warning: "⚠️",
