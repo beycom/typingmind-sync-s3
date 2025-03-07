@@ -676,11 +676,18 @@ async function deleteChatFromCloud(chatId) {
     
     logToConsole("success", `Deleted chat ${chatId} from cloud`);
     
-    // Update cloud metadata to remove the chat
+    // Update cloud metadata to add a tombstone instead of completely removing the chat
     const cloudMetadata = await downloadCloudMetadata();
-    if (cloudMetadata.chats && cloudMetadata.chats[chatId]) {
-      delete cloudMetadata.chats[chatId];
+    if (cloudMetadata.chats) {
+      // Create a tombstone entry instead of deleting the entry completely
+      cloudMetadata.chats[chatId] = {
+        deleted: true,
+        deletedAt: Date.now(),
+        lastModified: Date.now(),
+        syncedAt: Date.now()
+      };
       await uploadCloudMetadata(cloudMetadata);
+      logToConsole("info", `Created tombstone entry for deleted chat ${chatId} in cloud metadata`);
     }
     
     // Create a "tombstone" entry in local metadata to mark this chat as deleted
@@ -994,6 +1001,27 @@ async function syncFromCloud() {
          // This is a tombstone entry, we should delete the chat from cloud
          chatChanges.toDelete.push(chatId);
          logToConsole("cleanup", `Chat ${chatId} has a local tombstone entry - marking for deletion from cloud`);
+         continue;
+       }
+       
+       // Check if this chat has a tombstone in cloud metadata (deleted from another device)
+       if (cloudChatMeta.deleted === true) {
+         if (chatExistsLocally) {
+           // If chat still exists locally, mark it for deletion
+           chatChanges.toDelete.push(chatId);
+           logToConsole("cleanup", `Chat ${chatId} has a cloud tombstone entry - marking for deletion locally`);
+         }
+         // Keep the tombstone in sync
+         if (!localChatMeta || localChatMeta.deleted !== true) {
+           localMetadata.chats[chatId] = {
+             deleted: true,
+             deletedAt: cloudChatMeta.deletedAt || Date.now(),
+             lastModified: Date.now(),
+             syncedAt: Date.now()
+           };
+           saveLocalMetadata();
+           logToConsole("info", `Created local tombstone for chat ${chatId} from cloud tombstone`);
+         }
          continue;
        }
        
