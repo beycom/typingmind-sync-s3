@@ -29,7 +29,7 @@ let operationState = {
 // Configuration options with defaults
 let syncConfig = {
   syncMode: 'sync', // 'sync' or 'backup'
-  syncInterval: 60, // seconds
+  syncInterval: 15, // seconds
   importThreshold: 1, // percentage
   exportThreshold: 10, // percentage
   alertOnSmallerCloud: true
@@ -72,7 +72,7 @@ function logToConsole(type, message, data = null) {
   };
   
   const icon = icons[type] || "ℹ️";
-  const logMessage = `${icon} [Chat Sync v${EXTENSION_VERSION}] ${message}`;
+  const logMessage = `${icon}  ${timestamp} [Chat Sync v${EXTENSION_VERSION}] ${message}`;
   
   switch (type) {
     case "error":
@@ -191,7 +191,7 @@ async function initializeLastSeenUpdates() {
 // Load configuration from localStorage
 function loadConfiguration() {
   syncConfig.syncMode = localStorage.getItem("sync-mode") || 'sync';
-  syncConfig.syncInterval = parseInt(localStorage.getItem("backup-interval") || "60");
+  syncConfig.syncInterval = parseInt(localStorage.getItem("backup-interval") || "15");
   syncConfig.importThreshold = parseFloat(localStorage.getItem("import-size-threshold") || "1");
   syncConfig.exportThreshold = parseFloat(localStorage.getItem("export-size-threshold") || "10");
   syncConfig.alertOnSmallerCloud = localStorage.getItem("alert-smaller-cloud") === "true";
@@ -347,9 +347,9 @@ function startPeriodicChangeCheck() {
   }
   
   // Set interval for checking changes (every 5 seconds)
-  window.changeCheckInterval = setInterval(checkForChanges, 5000);
+  window.changeCheckInterval = setInterval(checkForChanges, 3000);
   
-  logToConsole("info", "Started periodic change detection (checking every 5 seconds)");
+  logToConsole("info", "Started periodic change detection (checking every 3 seconds)");
 }
 
 // Check for changes in chats by comparing updatedAt timestamps
