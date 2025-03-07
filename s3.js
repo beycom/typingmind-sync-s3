@@ -647,12 +647,9 @@ async function importFromS3() {
         indexedDBSize: JSON.stringify(currentData.indexedDB || {}).length,
       });
   
-      // TIME-BASED DECISION: Compare timestamps to decide which data is newer
-      const isCloudNewer = isSignificantlyNewer(cloudTimestamp, currentTimestamp);
-      const localFileSize = JSON.stringify(currentData).length;
-      
-      // If cloud data is older, we should upload our data instead
-      if (!isCloudNewer && currentTimestamp > 0) {
+      // ------------- TIMESTAMP-BASED DECISION ONLY -------------
+      // If we know our local data is newer, just back it up and quit
+      if (currentTimestamp > cloudTimestamp && currentTimestamp > 0) {
         logToConsole("info", `Local data is newer (${new Date(currentTimestamp).toLocaleString()}) than cloud (${new Date(cloudTimestamp).toLocaleString()})`);
         
         // Don't import, but export our newer data 
@@ -663,26 +660,37 @@ async function importFromS3() {
         return false;
       }
   
-      // If timestamps are identical but content is different, we have a conflict
-      if (cloudTimestamp === currentTimestamp && cloudTimestamp > 0 && cloudFileSize !== localFileSize) {
-        logToConsole("warning", "Same timestamp but different content - possible conflict");
-      }
-  
-      // For significant data differences, still prompt the user
-      const sizeDiffPercentage = Math.abs(((cloudFileSize - localFileSize) / localFileSize) * 100);
-      const shouldAlertOnSmallerCloud = getShouldAlertOnSmallerCloud();
-      const TOLERANCE_BYTES = 5;
-      const isCloudSignificantlySmaller = shouldAlertOnSmallerCloud && cloudFileSize < localFileSize - TOLERANCE_BYTES;
+      // ------------- SIZE INFORMATION (DEBUG ONLY) -------------
+      // This is purely for logging and has NO EFFECT on sync decisions
+      const localFileSize = JSON.stringify(currentData).length;
+      const sizeDiffPercentage = localFileSize > 0 ? 
+        Math.abs(((cloudFileSize - localFileSize) / localFileSize) * 100) : 0;
       
-      const shouldPrompt = (
-        (localFileSize > 0 && sizeDiffPercentage > getImportThreshold()) ||
-        isCloudSignificantlySmaller
-      ) && isCloudNewer; // Only prompt if the cloud data is actually newer
+      logToConsole("info", "Size comparison:", {
+        cloudSize: `${cloudFileSize} bytes`,
+        localSize: `${localFileSize} bytes`,
+        difference: `${cloudFileSize - localFileSize} bytes (${sizeDiffPercentage.toFixed(4)}%)`,
+        isSignificant: sizeDiffPercentage > 5
+      });
   
-      if (shouldPrompt) {
+      // ------------- USER INFORMATION ONLY -------------
+      // Only show alerts if there's a massive size difference (potential corruption)
+      const SIGNIFICANT_SIZE_DIFF = 30; // 30% is very significant
+      const MINIMUM_DIFFERENCE_BYTES = 50000; // At least 50KB different
+      const absoluteSizeDiff = Math.abs(cloudFileSize - localFileSize);
+      
+      const shouldAlertUser = (
+        // Only alert if cloud is newer (by timestamp) AND there's a big size difference
+        currentTimestamp > 0 && 
+        cloudTimestamp > currentTimestamp &&
+        sizeDiffPercentage > SIGNIFICANT_SIZE_DIFF && 
+        absoluteSizeDiff > MINIMUM_DIFFERENCE_BYTES
+      );
+  
+      if (shouldAlertUser) {
         try {
           isWaitingForUserInput = true;
-          logToConsole("info", `Showing prompt to user...`);
+          logToConsole("info", `Showing information alert to user (cloud is newer but size differs significantly)`);
           
           // Pause backup interval during user input
           if (backupInterval) {
@@ -695,26 +703,20 @@ async function importFromS3() {
   
           let message = `Cloud backup is from: ${new Date(cloudTimestamp).toLocaleString()}\n`;
           message += `Your local data is from: ${new Date(currentTimestamp).toLocaleString()}\n\n`;
-          message += `Cloud backup size: ${cloudFileSize || "Unknown"} bytes\n`;
-          message += `Local data size: ${localFileSize} bytes\n`;
+          message += `The cloud backup (${formatSize(cloudFileSize)}) is ${
+            cloudFileSize > localFileSize ? "larger" : "smaller"
+          } than your local data (${formatSize(localFileSize)}) by ${sizeDiffPercentage.toFixed(1)}%.\n\n`;
           
-          if (cloudFileSize) {
-            message += `Size difference: ${sizeDiffPercentage.toFixed(2)}%\n\n`;
-          }
+          message += "This unusually large size difference could indicate:\n";
+          message += "- Significant content changes\n";
+          message += "- New features in the app\n";
+          message += "- Potential data corruption\n\n";
           
-          if (cloudFileSize && sizeDiffPercentage > getImportThreshold()) {
-            message += `⚠️ Size difference exceeds ${getImportThreshold()}%\n`;
-          }
-          
-          if (isCloudSignificantlySmaller) {
-            message += "⚠️ Warning: Cloud backup is smaller than local data\n";
-          }
-          
-          message += '\nDo you want to proceed with importing the cloud backup? Clicking "Proceed" will overwrite your local data. If you "Cancel", the local data will overwrite the cloud backup.';
+          message += `The cloud backup is newer, so it will be imported. Continue?`;
   
           const shouldProceed = await showCustomAlert(
             message,
-            "Confirmation required",
+            "Significant Size Difference",
             [
               { text: "Cancel", primary: false },
               { text: "Proceed", primary: true },
@@ -722,7 +724,7 @@ async function importFromS3() {
           );
   
           if (!shouldProceed) {
-            logToConsole("info", `Import cancelled by user`);
+            logToConsole("info", `Import cancelled by user despite cloud being newer`);
             isWaitingForUserInput = false;
             
             // If user cancelled, export local data to cloud instead
@@ -733,15 +735,15 @@ async function importFromS3() {
             return false;
           }
         } catch (error) {
-          logToConsole("error", "Error during import prompt:", error);
+          logToConsole("error", "Error during import alert:", error);
           throw error;
         } finally {
           isWaitingForUserInput = false;
         }
       }
   
-      // Proceed with import since cloud data is newer or user confirmed
-      logToConsole("info", `Importing newer data from cloud`);
+      // Proceed with import since cloud data is newer (by timestamp)
+      logToConsole("info", `Importing newer data from cloud (timestamp: ${new Date(cloudTimestamp).toLocaleString()})`);
       
       try {
         importDataToStorage(cloudData);
@@ -781,7 +783,13 @@ async function importFromS3() {
     }
   }
   
-
+  // Helper function to format file sizes
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + " bytes";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+  
   async function backupToS3() {
     if (isExportInProgress) {
       logToConsole("skip", "Export already in progress, queueing this export");
@@ -856,8 +864,9 @@ async function importFromS3() {
       data = await exportBackupData();
       const localTimestamp = getTimestamp(data);
       
-      // If cloud data exists and is newer than our local data, we should not overwrite it
-      if (isSignificantlyNewer(cloudTimestamp, localTimestamp)) {
+      // ------------- TIMESTAMP-BASED DECISION ONLY -------------
+      // If cloud data exists and is NEWER than our local data, we should not overwrite it
+      if (cloudTimestamp > localTimestamp && cloudTimestamp > 0) {
         logToConsole("warning", `Cloud data is newer (${new Date(cloudTimestamp).toLocaleString()}) than local (${new Date(localTimestamp).toLocaleString()}). Aborting export.`);
         
         // Instead, import the newer cloud data
@@ -874,14 +883,9 @@ async function importFromS3() {
   
       const dataSize = blob.size;
       localFileSize = dataSize;
-      cloudFileSize = dataSize; // Will be updated after upload
-      isLocalDataModified = false;
-      updateSyncStatus();
-  
-      if (dataSize < 100) {
-        throw new Error("Final backup blob is too small or empty");
-      }
-  
+      
+      // ------------- SIZE INFORMATION (DEBUG ONLY) -------------
+      // This is purely for logging and has NO EFFECT on sync decisions
       const sizeDiffPercentage = cloudFileSize ? 
         Math.abs(((dataSize - cloudFileSize) / cloudFileSize) * 100) : 0;
   
@@ -891,18 +895,47 @@ async function importFromS3() {
         difference: cloudFileSize ? 
           `${dataSize - cloudFileSize} bytes (${sizeDiffPercentage.toFixed(4)}%)` : 
           "N/A (first backup)",
+        isSignificant: sizeDiffPercentage > 5
       });
   
-      // For significant size changes, still ask for confirmation
-      if (cloudFileSize && sizeDiffPercentage > getExportThreshold()) {
+      // Update after successful creation
+      cloudFileSize = dataSize; 
+      isLocalDataModified = false;
+      updateSyncStatus();
+  
+      if (dataSize < 100) {
+        throw new Error("Final backup blob is too small or empty");
+      }
+  
+      // ------------- USER INFORMATION ONLY -------------
+      // Only show alerts if there's a massive size difference (potential corruption)
+      const SIGNIFICANT_SIZE_DIFF = 30; // 30% is very significant
+      const MINIMUM_DIFFERENCE_BYTES = 50000; // At least 50KB different
+      const absoluteSizeDiff = Math.abs(dataSize - cloudFileSize);
+      
+      const shouldAlertUser = (
+        cloudFileSize > 0 &&
+        sizeDiffPercentage > SIGNIFICANT_SIZE_DIFF && 
+        absoluteSizeDiff > MINIMUM_DIFFERENCE_BYTES
+      );
+  
+      if (shouldAlertUser) {
         isWaitingForUserInput = true;
-        const message = `Warning: The new backup size (${dataSize} bytes) differs significantly from the current cloud backup (${cloudFileSize} bytes) by ${sizeDiffPercentage.toFixed(
-          2
-        )}% (threshold: ${getExportThreshold()}%).\n\nDo you want to proceed with the upload?`;
+        
+        let message = `Your local data (${formatSize(dataSize)}) is ${
+          dataSize > cloudFileSize ? "larger" : "smaller"
+        } than the current cloud backup (${formatSize(cloudFileSize)}) by ${sizeDiffPercentage.toFixed(1)}%.\n\n`;
+        
+        message += "This unusually large size difference could indicate:\n";
+        message += "- Significant content changes\n";
+        message += "- New features in the app\n";
+        message += "- Potential data corruption\n\n";
+        
+        message += "Your local data is newer, so it will replace the cloud backup. Continue?";
         
         const shouldProceed = await showCustomAlert(
           message,
-          "Size Difference Warning",
+          "Significant Size Difference",
           [
             { text: "Cancel", primary: false },
             { text: "Proceed", primary: true },
@@ -912,8 +945,8 @@ async function importFromS3() {
         isWaitingForUserInput = false;
         
         if (!shouldProceed) {
-          logToConsole("info", "Export cancelled due to size difference");
-          throw new Error("Export cancelled due to significant size difference");
+          logToConsole("info", "Export cancelled by user despite local being newer");
+          throw new Error("Export cancelled by user");
         }
       }
   
@@ -967,6 +1000,7 @@ async function importFromS3() {
     }
   }
   
+
 
 setInterval(updateSyncStatus, 1000);
 
@@ -2421,8 +2455,21 @@ function exportBackupData() {
   
 // Gets timestamp from data, handling both new and old format
 function getTimestamp(data) {
-    return (data.metadata && data.metadata.timestamp) || data.timestamp || 0;
+    if (!data) return 0;
+    
+    // Check for metadata first
+    if (data.metadata && typeof data.metadata.timestamp === 'number') {
+      return data.metadata.timestamp;
+    }
+    
+    // Check for root level timestamp
+    if (typeof data.timestamp === 'number') {
+      return data.timestamp;
+    }
+    
+    return 0;
   }
+  
   
 // Determines if timestamp A is significantly newer than B (with 10s tolerance)
 function isSignificantlyNewer(timestampA, timestampB, thresholdMs = 10000) {
