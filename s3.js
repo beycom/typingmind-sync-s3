@@ -4,7 +4,7 @@
 // ==================== CONSTANTS & STATE ====================
 
 const EXTENSION_VERSION = '1.0.2';
-const MOBILE_DEBUG = true
+const MOBILE_DEBUG = false
 let isConsoleLoggingEnabled = new URLSearchParams(window.location.search).get("log") === "true";
 
 // Add this function to show errors visually on mobile
@@ -14,7 +14,7 @@ function showMobileDebug(message, isError = false) {
     if (!document.getElementById('mobile-debug')) {
       const debugEl = document.createElement('div');
       debugEl.id = 'mobile-debug';
-      debugEl.style.cssText = 'position:fixed; bottom:200px; left:10px; right:10px; max-height:500px; max-width:700px; overflow-y:auto; background:rgba(0,0,0,0.8); color:white; z-index:9999; padding:10px; border-radius:5px; font-size:12px;';
+      debugEl.style.cssText = 'position:fixed; bottom:150px; left:10px; right:10px; max-height:300px; overflow-y:auto; background:rgba(0,0,0,0.8); color:white; z-index:9999; padding:10px; border-radius:5px; font-size:12px;';
       document.body.appendChild(debugEl);
     }
     
@@ -55,7 +55,7 @@ let operationState = {
 // Configuration options with defaults
 let syncConfig = {
   syncMode: 'sync', // 'sync' or 'backup'
-  syncInterval: 30, // seconds
+  syncInterval: 15, // seconds
   importThreshold: 1, // percentage
   exportThreshold: 10, // percentage
   alertOnSmallerCloud: true
@@ -220,7 +220,7 @@ async function initializeLastSeenUpdates() {
 // Load configuration from localStorage
 function loadConfiguration() {
   syncConfig.syncMode = localStorage.getItem("sync-mode") || 'sync';
-  syncConfig.syncInterval = parseInt(localStorage.getItem("backup-interval") || "60");
+  syncConfig.syncInterval = parseInt(localStorage.getItem("backup-interval") || "15");
   syncConfig.importThreshold = parseFloat(localStorage.getItem("import-size-threshold") || "1");
   syncConfig.exportThreshold = parseFloat(localStorage.getItem("export-size-threshold") || "10");
   syncConfig.alertOnSmallerCloud = localStorage.getItem("alert-smaller-cloud") === "true";
@@ -376,9 +376,9 @@ function startPeriodicChangeCheck() {
   }
   
   // Set interval for checking changes (every 5 seconds)
-  window.changeCheckInterval = setInterval(checkForChanges, 5000);
+  window.changeCheckInterval = setInterval(checkForChanges, 3000);
   
-  logToConsole("info", "Started periodic change detection (checking every 5 seconds)");
+  logToConsole("info", "Started periodic change detection (checking every 3 seconds)");
 }
 
 // Check for changes in chats by comparing updatedAt timestamps
@@ -410,6 +410,9 @@ async function checkForChanges() {
         changedChats: changedChats,
         count: changedChats.length
       });
+    }
+    else {
+      logToConsole("info", "No changes detected in chats");
     }
   } catch (error) {
     logToConsole("error", "Error checking for changes", error);
