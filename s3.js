@@ -1049,8 +1049,20 @@ async function syncFromCloud() {
           } else if (localMetadata.lastSyncTime > 0) {
             // Case 2: Chat was deleted from cloud (on another device)
             // Only process this if we've synced at least once before
-            chatChanges.toDelete.push(chatId);
-            logToConsole("cleanup", `Marking local chat ${chatId} for deletion - exists locally but not in cloud metadata`);
+            
+            // Check if this is a recently created chat (within last 5 minutes)
+            const creationThreshold = 5 * 60 * 1000; // 5 minutes in milliseconds
+            const chatCreationTime = localMetadata.chats[chatId].lastModified; // Use lastModified as an approximation for creation time
+            const isRecentlyCreated = (Date.now() - chatCreationTime) < creationThreshold;
+            
+            if (!isRecentlyCreated) {
+              chatChanges.toDelete.push(chatId);
+              logToConsole("cleanup", `Marking local chat ${chatId} for deletion - exists locally but not in cloud metadata`);
+            } else {
+              logToConsole("info", `Skipping deletion for recently created chat ${chatId} (created ${Math.round((Date.now() - chatCreationTime) / 1000)} seconds ago)`);
+              // Give new chats a chance to be uploaded
+              chatChanges.toUpload.push(chatId);
+            }
           }
         }
       }
