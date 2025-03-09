@@ -6,4 +6,4 @@ function removeShitFromUI() {
 }
 
 
-setTimeout(() => {removeShitFromUI}, 1000);
+setTimeout(() => {removeShitFromUI()}, 500);
