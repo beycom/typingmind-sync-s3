@@ -1144,8 +1144,23 @@ async function uploadSettingsToCloud() {
       try {
         const value = await getIndexedDBKey(key);
         if (value !== undefined) {
-          settingsData[key] = value;
-          logToConsole("info", `Added IndexedDB key ${key} to settings upload`);
+          // Properly serialize complex objects to avoid [object Object] issue
+          // Use deep clone via JSON to ensure proper serialization
+          try {
+            // First check if the value is already a string
+            if (typeof value === 'string') {
+              settingsData[key] = value;
+            } else {
+              // If it's an object, properly serialize it
+              settingsData[key] = JSON.stringify(value);
+              logToConsole("info", `Serialized complex object for ${key}`);
+            }
+          } catch (serializeError) {
+            logToConsole("error", `Failed to serialize ${key}, storing as string`, serializeError);
+            // Fallback: store as string representation to prevent data loss
+            settingsData[key] = JSON.stringify(String(value));
+          }
+          logToConsole("info", `Added IndexedDB key ${key} to settings upload (type: ${typeof settingsData[key]})`);
         }
       } catch (error) {
         logToConsole("error", `Error reading IndexedDB key ${key} for sync`, error);
@@ -2597,7 +2612,25 @@ async function performInitialSync() {
       if (cloudSettings && cloudSettings[key]) {
         try {
           logToConsole("download", `Applying cloud ${key.replace('TM_use', '')} data to local IndexedDB`);
-          await setIndexedDBKey(key, cloudSettings[key]);
+          
+          // Deserialize values that were serialized during upload
+          let valueToStore = cloudSettings[key];
+          
+          // Check if the value is a serialized JSON string that needs to be parsed
+          if (typeof valueToStore === 'string' &&
+              (valueToStore.startsWith('{') || valueToStore.startsWith('[')) &&
+              (valueToStore.endsWith('}') || valueToStore.endsWith(']'))) {
+            try {
+              valueToStore = JSON.parse(valueToStore);
+              logToConsole("info", `Successfully deserialized complex object for ${key}`);
+            } catch (parseError) {
+              logToConsole("warning", `Failed to parse ${key} as JSON, using as-is`, parseError);
+              // Continue with the string value
+            }
+          }
+          
+          await setIndexedDBKey(key, valueToStore);
+          logToConsole("success", `Applied cloud ${key.replace('TM_use', '')} data to local IndexedDB (type: ${typeof valueToStore})`);
         } catch (error) {
           logToConsole("error", `Error setting IndexedDB key ${key}`, error);
         }
