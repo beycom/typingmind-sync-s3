@@ -169,10 +169,7 @@ async function initializeExtension() {
   
   // Check if we should perform initial sync
   if (syncConfig.syncMode === 'sync') {
-    // Add a short delay to allow any pending operations to complete first
-    setTimeout(() => {
-      queueOperation('initial-sync', syncFromCloud);
-    }, 2000);
+    queueOperation('initial-sync', performInitialSync);
   }
   
   // Start periodic check for changes
@@ -189,6 +186,7 @@ async function initializeExtension() {
   
   logToConsole("success", "Chat Sync Extension initialized");
 }
+
 
 // Initialize tracking of last seen updates
 async function initializeLastSeenUpdates() {
@@ -379,10 +377,14 @@ function startPeriodicChangeCheck() {
   }
   
   // Set interval for checking changes (every 5 seconds)
-  window.changeCheckInterval = setInterval(checkForChanges, 2500);
+  window.changeCheckInterval = setInterval(() => {
+    checkForChanges();
+    checkForSpecialKeyChanges(); // Also check for special key changes
+  }, 2500);
   
   // This log is redundant with the one above
 }
+
 
 // Check for changes in chats by comparing hash first, then timestamps
 async function checkForChanges() {
@@ -1057,8 +1059,13 @@ async function downloadSettingsFromCloud() {
       const encryptedContent = new Uint8Array(data.Body);
       const settingsData = await decryptData(encryptedContent);
       
+      // Log success with info about special keys
+      const specialKeys = ['TM_useInstalledPlugins', 'TM_useUserCharacters', 'TM_useUserPrompts'];
+      const specialKeysFound = specialKeys.filter(key => settingsData[key] !== undefined);
+      
       logToConsole("success", "Downloaded settings from cloud", {
-        settingsCount: Object.keys(settingsData).length
+        settingsCount: Object.keys(settingsData).length,
+        specialKeysFound: specialKeysFound
       });
       
       return settingsData;
@@ -1082,6 +1089,20 @@ async function downloadSettingsFromCloud() {
             settingsData[key] = localStorage.getItem(key);
           }
         }
+        
+        // Add special IndexedDB keys
+        const indexedDBKeys = ['TM_useInstalledPlugins', 'TM_useUserCharacters', 'TM_useUserPrompts'];
+        for (const key of indexedDBKeys) {
+          try {
+            const value = await getIndexedDBKey(key);
+            if (value !== undefined) {
+              settingsData[key] = value;
+            }
+          } catch (error) {
+            logToConsole("error", `Error reading IndexedDB key ${key} for initial settings`, error);
+          }
+        }
+        
         return settingsData;
       }
       throw error;
@@ -1091,6 +1112,7 @@ async function downloadSettingsFromCloud() {
     throw error;
   }
 }
+
 
 // Upload settings to cloud
 async function uploadSettingsToCloud() {
@@ -1107,12 +1129,26 @@ async function uploadSettingsToCloud() {
       const key = localStorage.key(i);
       // Exclude the AWS credentials and a few technical keys for security
       const excludeKeys = [
-        "aws-access-key", "aws-secret-key", "encryption-key", 
+        "aws-access-key", "aws-secret-key", "encryption-key",
         "aws-endpoint", "aws-region", "aws-bucket"
       ];
       
       if (!excludeKeys.includes(key)) {
         settingsData[key] = localStorage.getItem(key);
+      }
+    }
+
+    // Add IndexedDB keys to settings
+    const indexedDBKeys = ['TM_useInstalledPlugins', 'TM_useUserCharacters', 'TM_useUserPrompts'];
+    for (const key of indexedDBKeys) {
+      try {
+        const value = await getIndexedDBKey(key);
+        if (value !== undefined) {
+          settingsData[key] = value;
+          logToConsole("info", `Added IndexedDB key ${key} to settings upload`);
+        }
+      } catch (error) {
+        logToConsole("error", `Error reading IndexedDB key ${key} for sync`, error);
       }
     }
     
@@ -1153,6 +1189,7 @@ async function uploadSettingsToCloud() {
     throw error;
   }
 }
+
 
 // ==================== SYNC OPERATIONS ====================
 
@@ -1295,7 +1332,7 @@ async function syncFromCloud() {
     // Download cloud metadata
     const cloudMetadata = await downloadCloudMetadata();
     
-    // Check for settings changes
+    // Check for settings changes (excluding special keys which are handled separately on initialization)
     if (cloudMetadata.settings &&
         cloudMetadata.settings.lastModified > localMetadata.settings.syncedAt) {
       logToConsole("info", "Settings changes detected in cloud");
@@ -1308,7 +1345,9 @@ async function syncFromCloud() {
         // Apply each setting (preserving only security-related keys)
         const preserveKeys = [
           "aws-bucket", "aws-access-key", "aws-secret-key", "aws-region",
-          "aws-endpoint", "encryption-key", "chat-sync-metadata"
+          "aws-endpoint", "encryption-key", "chat-sync-metadata",
+          // Don't overwrite our special keys during regular syncs
+          "TM_useInstalledPlugins", "TM_useUserCharacters", "TM_useUserPrompts"
         ];
         
         for (const [key, value] of Object.entries(cloudSettings)) {
@@ -1649,6 +1688,7 @@ async function syncFromCloud() {
     }
   }
 }
+
 
 // Merge two versions of a chat (conflict resolution)
 async function mergeChats(localChat, cloudChat) {
@@ -2462,6 +2502,151 @@ function monitorIndexedDBForDeletions() {
     }
   }, 10000); // Check every 10 seconds
 }
+
+
+// Get value from IndexedDB for a specific key
+async function getIndexedDBKey(key) {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("keyval-store", 1);
+    
+    request.onerror = () => reject(request.error);
+    
+    request.onsuccess = (event) => {
+      const db = event.target.result;
+      const transaction = db.transaction(["keyval"], "readonly");
+      const store = transaction.objectStore("keyval");
+      
+      const getRequest = store.get(key);
+      
+      getRequest.onsuccess = () => {
+        resolve(getRequest.result);
+      };
+      
+      getRequest.onerror = () => {
+        reject(getRequest.error);
+      };
+    };
+    
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains('keyval')) {
+        db.createObjectStore('keyval');
+      }
+    };
+  });
+}
+
+// Set value in IndexedDB for a specific key
+async function setIndexedDBKey(key, value) {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("keyval-store", 1);
+    
+    request.onerror = () => reject(request.error);
+    
+    request.onsuccess = (event) => {
+      const db = event.target.result;
+      const transaction = db.transaction(["keyval"], "readwrite");
+      const store = transaction.objectStore("keyval");
+      
+      const putRequest = store.put(value, key);
+      
+      putRequest.onsuccess = () => {
+        resolve();
+      };
+      
+      putRequest.onerror = () => {
+        reject(putRequest.error);
+      };
+    };
+    
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains('keyval')) {
+        db.createObjectStore('keyval');
+      }
+    };
+  });
+}
+
+// Track if we've done the initial special keys sync
+let initialSpecialKeysSyncDone = false;
+
+// Perform initial sync on page load
+async function performInitialSync() {
+  logToConsole("start", "Performing initial page load sync");
+  
+  try {
+    // Check AWS credentials
+    const encryptionKey = localStorage.getItem("encryption-key");
+    const bucketName = localStorage.getItem("aws-bucket");
+    const awsAccessKey = localStorage.getItem("aws-access-key");
+    const awsSecretKey = localStorage.getItem("aws-secret-key");
+    
+    if (!bucketName || !awsAccessKey || !awsSecretKey || !encryptionKey) {
+      logToConsole("warning", "AWS credentials or encryption key not configured");
+      return;
+    }
+    
+    // First, download cloud settings which include plugins, characters and prompts
+    logToConsole("download", "Downloading plugins, characters, and prompts from cloud");
+    const cloudSettings = await downloadSettingsFromCloud();
+    
+    // Apply plugins, characters, and prompts first (download from cloud to local)
+    const specialKeys = ['TM_useInstalledPlugins', 'TM_useUserCharacters', 'TM_useUserPrompts'];
+    for (const key of specialKeys) {
+      if (cloudSettings && cloudSettings[key]) {
+        try {
+          logToConsole("download", `Applying cloud ${key.replace('TM_use', '')} data to local IndexedDB`);
+          await setIndexedDBKey(key, cloudSettings[key]);
+        } catch (error) {
+          logToConsole("error", `Error setting IndexedDB key ${key}`, error);
+        }
+      }
+    }
+    
+    // Mark that we've completed the initial special keys sync
+    initialSpecialKeysSyncDone = true;
+    
+    // Now proceed with the regular sync
+    await syncFromCloud();
+    
+    logToConsole("success", "Initial page load sync completed");
+  } catch (error) {
+    logToConsole("error", "Error during initial page load sync", error);
+  }
+}
+
+// Check for special key changes
+async function checkForSpecialKeyChanges() {
+  if (document.hidden) return; // Skip if tab is not visible
+  
+  try {
+    const specialKeys = ['TM_useInstalledPlugins', 'TM_useUserCharacters', 'TM_useUserPrompts'];
+    let hasChanges = false;
+    
+    for (const key of specialKeys) {
+      try {
+        // Simply check if the key exists, if it does, queue an upload
+        const value = await getIndexedDBKey(key);
+        if (value !== undefined) {
+          hasChanges = true;
+          break;
+        }
+      } catch (error) {
+        logToConsole("error", `Error checking for changes in ${key}`, error);
+      }
+    }
+    
+    if (hasChanges) {
+      logToConsole("info", "Detected plugins, characters, or prompts - queueing upload");
+      queueOperation('special-keys-upload', uploadSettingsToCloud);
+    }
+  } catch (error) {
+    logToConsole("error", "Error checking for special key changes", error);
+  }
+}
+
+
 
 // Initialize the extension when the DOM is ready
 if (document.readyState === "loading") {
